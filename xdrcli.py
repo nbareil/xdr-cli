@@ -1,0 +1,398 @@
+import tempfile
+import subprocess
+import os
+import hashlib
+import gzip
+import json
+import logging
+import time
+import sys
+import string
+import secrets
+
+import requests
+import click
+
+from typing import List
+from datetime import datetime, timezone
+
+AUTH_FILE = os.path.join(os.environ.get("HOME"), ".xdr-cli-auth.json")
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
+
+@click.group()
+@click.option("--verbose", default=False, help="Verbose mode", is_flag=True)
+@click.option("--base-url", default="", help="Base URL to XDR tenant")
+@click.option("--api-key-id", default="", help="API Key ID")
+@click.option("--api-key-hash", default="", help="API Key Hash")
+@click.option("--profile", "-p", default="", help="Select XDR tenant")
+@click.pass_context
+def cli(ctx, base_url, verbose, api_key_id, api_key_hash, profile):
+    # ensure that ctx.obj exists and is a dict (in case `cli()` is called
+    # by means other than the `if` block below)
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    if profile:
+        profiles = json.load(open(AUTH_FILE))
+        if profile in profiles:
+            ctx.obj["base_url"] = profiles[profile]["base_url"]
+            ctx.obj["api_key_id"] = profiles[profile]["api_key_id"]
+            ctx.obj["api_key_hash"] = profiles[profile]["api_key_hash"]
+    else:
+        ctx.obj["base_url"] = base_url
+        ctx.obj["api_key_id"] = api_key_id
+        ctx.obj["api_key_hash"] = api_key_hash
+    # if not(all([ctx.obj['base_url'], ctx.obj['api_key_id'], ctx.obj['api_key_hash']])):
+    #    click.echo("Missing authentication bits")
+
+
+def generate_auth_headers(api_key_id, api_key) -> dict:
+    nonce = "".join(
+        [secrets.choice(string.ascii_letters + string.digits) for _ in range(64)]
+    )
+    timestamp = int(datetime.now(timezone.utc).timestamp()) * 1000
+    auth_key = "%s%s%s" % (api_key, nonce, timestamp)
+    auth_key = auth_key.encode("utf-8")
+    api_key_hash = hashlib.sha256(auth_key).hexdigest()
+    headers = {
+        "x-xdr-timestamp": str(timestamp),
+        "x-xdr-nonce": nonce,
+        "x-xdr-auth-id": str(api_key_id),
+        "Authorization": api_key_hash,
+    }
+    return headers
+
+
+def do_requests_post(
+    ctx: dict, uri: str, parameters: dict = {}, headers: dict = {}
+) -> requests.Response:
+    headers.update(
+        **generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
+    )
+    url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
+    res = requests.post(url, headers=headers, json=parameters)
+    return res
+
+
+@cli.group()
+@click.pass_context
+def endpoint(ctx):
+    pass
+
+
+@endpoint.command("list")
+@click.option("--platform", "-p", help="Filter by platform name: linux, windows, macos, android", type=str)
+@click.pass_context
+def endpoint_list(ctx: dict, platform: str = None):
+    """Get more information about an endpoint"""
+    endpoints = do_endpoint_list(ctx, platform)
+    for endpoint in endpoints:
+        click.echo(json.dumps(endpoint, indent=4))
+
+def do_endpoint_list(ctx: dict, platform: str):
+    params = dict(request_data=dict(filters=[]))
+    if platform:
+        params["request_data"]["filters"].append({
+            "field": "platform",
+            "operator": "in",
+            "value": [platform]
+        })
+    total_count = 1
+    offset = 0
+    while offset < total_count:
+        res = do_requests_post(ctx, "endpoints/get_endpoint", params)
+        if res.status_code != 200:
+            logger.error(f"endpoints/get_endpoint failed with {res.status_code}: {res.reason} {res.text}")
+            sys.exit(1)
+        obj = res.json()
+        endpoints = obj["reply"]["endpoints"]
+        offset +=  obj["reply"]["result_count"]
+        total_count = obj["reply"]["total_count"]
+        yield from endpoints
+
+@endpoint.command("get")
+@click.argument("hostname")
+@click.option("--field", "-f", help="Return only this field", type=str)
+@click.pass_context
+def endpoint_get(ctx: dict, hostname: str, field: str = None):
+    """Get more information about an endpoint"""
+    endpoints = do_endpoint_get(ctx, hostname)
+    for endpoint in endpoints:
+        if field:
+            click.echo(endpoint.get(field, "N/A"))
+        else:
+            click.echo(json.dumps(endpoint, indent=4))
+
+def do_endpoint_get(ctx: dict, hostname: str):
+    # click.echo(hostname)
+    parameters = {
+        "request_data": {
+            "filters": [
+                {"field": "hostname", "operator": "in", "value": [hostname]},
+            ],
+        }
+    }
+    res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
+    if res.status_code != 200:
+        click.echo(res.status_code, res.reason)
+        sys.exit(1)
+    obj = res.json()
+    if obj.get("reply", {}).get("total_count", 0) == 0:
+        click.echo("No match")
+        sys.exit(404)
+    return obj["reply"]["endpoints"]
+
+
+@endpoint.command("who-has")
+@click.argument("ip")
+@click.option("--raw", is_flag=True, help="Display the whole endpoint object")
+@click.pass_context
+def endpoint_who_has(ctx: dict, ip: str, raw: bool = False):
+    """Resolve an IP address to a hostname"""
+    # click.echo(hostname)
+    parameters = {
+        "request_data": {
+            "filters": [
+                {"field": "ip_list", "operator": "in", "value": [ip]},
+            ],
+        }
+    }
+    res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
+    if res.status_code != 200:
+        click.echo(res.status_code, res.reason)
+        sys.exit(1)
+    obj = res.json()
+    if obj.get("reply", {}).get("total_count", 0) == 0:
+        click.echo("No match")
+        sys.exit(404)
+    for endpoint in obj["reply"]["endpoints"]:
+        if raw:
+            click.echo(json.dumps(endpoint, indent=4))
+        else:
+            click.echo(endpoint["endpoint_name"])
+
+
+@cli.group
+def config():
+    """Configure xdr-cli"""
+    pass
+
+
+@config.group
+def tenant():
+    """Add, update, or remove an XDR tenant"""
+    pass
+
+
+@tenant.command
+@click.argument("name")
+def add(name: str):
+    tenants = {}
+    if os.path.exists(AUTH_FILE):
+        tenants = json.load(open(AUTH_FILE))
+    else:
+        click.confirm(
+            f"Authentication file {AUTH_FILE} does not exist, should I create it?",
+            abort=True,
+        )
+    if name in tenants:
+        click.confirm(
+            f"This tenant {name} already exists, should I update it?", abort=True
+        )
+    api_key_id = click.prompt("API Key ID", type=int)
+    api_key_hash = click.prompt("API Key Hash", type=str)
+    base_url = click.prompt("Base URL (without https://)", type=str)
+    tenants[name] = dict(
+        api_key_id=api_key_id, api_key_hash=api_key_hash, base_url=base_url
+    )
+    json.dump(tenants, open(AUTH_FILE, "w"))
+
+
+@tenant.command
+def list():
+    try:
+        tenants = json.load(open(AUTH_FILE))
+        for name in tenants:
+            click.echo(name)
+    except:
+        pass
+
+
+@tenant.command
+@click.argument("name")
+def remove(name: str):
+    tenants = json.load(open(AUTH_FILE))
+    del tenants[name]
+    json.dump(tenants, open(AUTH_FILE, "w"))
+
+
+@cli.command("get-file")
+@click.option("--endpoint-id", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--output", "-o", type=click.File("wb"), required=True)
+@click.argument("path", nargs=-1)
+@click.pass_context
+def get_file(ctx, endpoint_id: str, path: List[str], output, hostname):
+    """Retrieve a file from an endpoint."""
+    if hostname:
+        endpoints = do_endpoint_get(ctx, hostname)
+        endpoint_id = endpoints[0]["endpoint_id"]
+    params = {
+        "request_data": {
+            "filters": [
+                {"field": "endpoint_id_list", "operator": "in", "value": [endpoint_id]}
+            ],
+            "files": {
+                "windows": path,
+                "macos": path,
+                "linux": path,
+            },
+        }
+    }
+    res = do_requests_post(ctx, "endpoints/file_retrieval", params)
+    ret = res.json()
+    action_id = ret.get("reply", {}).get("action_id")
+    if not action_id:
+        click.echo("There was an error retrieving the file")
+        sys.exit(1)
+
+    final_states = [
+        "CANCELLED",
+        "ABORTED",
+        "EXPIRED",
+        "COMPLETED_PARTIAL",
+        "COMPLETED_SUCCESSFULLY",
+        "FAILED",
+        "TIMEOUT",
+    ]
+    while True:
+        status = get_action_status(ctx, action_id, endpoint_id)
+        if status in final_states:
+            break
+        time.sleep(5)
+    if not status.startswith("COMPLETED"):
+        click.echo(f"File retrieval ended in state {status}")
+        sys.exit(2)
+    retrieve_file(ctx, output, action_id, endpoint_id)
+
+
+def get_action_status(ctx, action_id, endpoint_id) -> str:
+    # PENDING IN_PROGRESS CANCELLED PENDING_ABORT ABORTED EXPIRED
+    # COMPLETED_PARTIAL COMPLETED_SUCCESSFULLY FAILED TIMEOUT
+    params = dict(request_data=dict(group_action_id=action_id))
+    res = do_requests_post(ctx, "actions/get_action_status", params)
+    res = res.json()
+    return res.get("reply", {}).get("data", {}).get(endpoint_id, "")
+
+
+def retrieve_file(ctx, output, action_id, endpoint_id):
+    params = {"request_data": {"group_action_id": action_id}}
+    res = do_requests_post(ctx, "actions/file_retrieval_details", params)
+    ret = res.json()
+    dl_url = ret.get("reply", {}).get("data", {}).get(endpoint_id)
+    res = requests.post(
+        dl_url,
+        headers=generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"]),
+    )
+    output.write(res.content)
+    output.close()
+
+def open_editor():
+    # ripped from https://stackoverflow.com/a/19377899
+    with tempfile.NamedTemporaryFile() as tmpfile:
+        subprocess.call( [ os.environ.get('EDITOR', None) or 'vim', tmpfile.name ] )
+
+        with open( tmpfile.name, 'r' ) as f:
+            data = f.read()
+    return data
+
+@cli.command
+@click.option("--begin-time", type=click.DateTime(), default=None, help="Begin of the timeframe")
+@click.option("--end-time", type=click.DateTime(), default=None, help="End of the timeframe")
+@click.option("--output", type=click.Path(exists=False), default=None, help="Output", required=True)
+@click.option("--excel", is_flag=True, help="Format output as Excel file")
+@click.argument("xql_query", type=str)
+@click.pass_context
+def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel: bool = False, output: str = ""):
+    """Execute an XQL query"""
+
+    if not xql_query:
+        xql_query = open_editor()
+
+    params = {
+        "request_data": {
+            "query": xql_query,
+        }
+    }
+
+    if begin_time and end_time:
+        params["request_data"]["timeframe"] = {
+            "from": begin_time,
+            "to": end_time,
+        }
+    res = do_requests_post(ctx, "xql/start_xql_query", params)
+    res = res.json()
+    query_id = res.get("reply")
+    logger.debug(query_id)
+    #query_id = "63c07a3d8fce42_16299_inv"
+    params = {
+        "request_data": {
+            "query_id": query_id,
+            "format": "json",
+            "pending_flag": False # Be synchronous (i.e. blocking)
+        }
+    }
+    res = do_requests_post(ctx, "xql/get_query_results", params)
+    resp = res.json()["reply"]
+    if resp.get("status") != "SUCCESS":
+        logger.error("xql/get_query_results failed: " + res.text)
+        sys.exit(1)
+    if resp.get("number_of_results", 0) <= 1000:
+        results = [json.dumps(entry) for entry in resp.get("results", {}).get("data", [])]
+    else:
+        logger.debug("Need to switch to the stream version")
+        params = {
+            "request_data": {
+                "stream_id": resp.get("results").get("stream_id"),
+                "is_gzip_compressed": False
+            }
+        }
+        logger.debug(params)
+
+        headers = generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
+        #headers["Accept-Encoding"] = "gzip"
+        uri = "xql/get_query_results_stream"
+        url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
+        with requests.post(url, json=params, headers=headers, stream=True) as r:
+            if not res.ok:
+                logger.error("xql/get_query_results_stream failed: " + res.text)
+                sys.exit(2)
+            results = [chunk.decode("utf-8") for chunk in r.iter_lines()]
+
+    if excel:
+        import xlsxwriter
+        workbook = xlsxwriter.Workbook(output)
+        worksheet = workbook.add_worksheet()
+        results = map(json.loads, results)
+        first = next(results)
+        logger.debug(first)
+        columns = first.keys()
+        logger.debug(columns)
+        for i, col in enumerate(columns):
+            worksheet.write(0, i, col)
+            worksheet.write(1, i, first.get(col, ""))
+        row = 0
+        for r in results:
+            row += 1
+            for i, col in enumerate(columns):
+                worksheet.write(row, i, r.get(col, ""))
+        workbook.close()
+    else:
+       for r in results:
+           print(r)
+
+
+
+if __name__ == "__main__":
+    cli()
