@@ -16,6 +16,8 @@ import click
 from typing import List
 from datetime import datetime, timezone
 
+# API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
+
 AUTH_FILE = os.path.join(os.environ.get("HOME"), ".xdr-cli-auth.json")
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,104 @@ def do_requests_post(
     res = requests.post(url, headers=headers, json=parameters)
     return res
 
+@cli.group()
+@click.pass_context
+def incident(ctx):
+    pass
+
+@incident.command("get")
+def get_incident(ctx):
+    pass
+
+@incident.command("close")
+def close_incident(ctx):
+    pass
+
+
+def do_list_incidents(ctx):
+    params = dict(request_data=dict())
+    offset = -1
+    total_count = 0
+    while offset < total_count:
+        res = do_requests_post(ctx, "incidents/get_incidents", params)
+        if res.status_code != 200:
+            logger.error(f"incidents/get_incidents failed with {res.status_code}: {res.reason} {res.text}")
+            sys.exit(1)
+        obj = res.json()
+        incidents = obj["reply"]["incidents"]
+        offset +=  obj["reply"]["result_count"]
+        total_count = obj["reply"]["total_count"]
+        params["request_data"]["search_from"] = offset
+        params["request_data"]["search_to"] = offset+100
+        yield from incidents
+
+@incident.command("list")
+@click.pass_context
+def list_incidents(ctx):
+    for incident in do_list_incidents(ctx):
+        print(json.dumps(incident))
+
+@incident.command("get")
+@click.argument("incident_id")
+@click.pass_context
+def get_incident(ctx, incident_id: str):
+    params = dict(request_data=dict(incident_id=incident_id))
+    res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
+    if res.status_code != 200:
+        logger.error(f"incidents/get_incident_extra_data failed with {res.status_code}: {res.reason} {res.text}")
+        sys.exit(1)
+    obj = res.json()
+    print(json.dumps(obj["reply"]))
+
+@incident.command("close")
+@click.argument("incident_id")
+@click.pass_context
+def close_incident(ctx, incident_id: str):
+    params = dict(request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved"))
+    res = do_requests_post(ctx, "incidents/update_incidents", params)
+    print(res)
+
+@cli.group()
+@click.pass_context
+def alert(ctx):
+    pass
+
+def do_alert_list(ctx):
+    params = dict(request_data=dict())
+    offset = -1
+    total_count = 0
+    while offset < total_count:
+        res = do_requests_post(ctx, "alerts/get_alerts", params)
+        if res.status_code != 200:
+            logger.error(f"alerts/get_alerts failed with {res.status_code}: {res.reason} {res.text}")
+            sys.exit(1)
+        obj = res.json()
+        alerts = obj["reply"]["alerts"]
+        offset +=  obj["reply"]["result_count"]
+        total_count = obj["reply"]["total_count"]
+        params["request_data"]["search_from"] = offset
+        params["request_data"]["search_to"] = offset+100
+        yield from alerts
+
+@alert.command("list")
+@click.pass_context
+def list_alerts(ctx):
+    for alert in do_alerts_list(ctx):
+        #print(alert["alert_id"])
+        print(json.dumps(alert))
+
+@alert.command("close")
+@click.argument("alert_id", type=int, nargs=-1)
+@click.pass_context
+def close_alert(ctx, alert_id: List[int]):
+    params = dict(request_data=dict(alert_id_list=alert_id, update_data=dict(status="resolved_other")))
+    print(params)
+    res = do_requests_post(ctx, "alerts/update_alerts", params)
+    if res.status_code != 200:
+        logger.error(f"alerts/update_alerts failed with {res.status_code}: {res.reason} {res.text}")
+        sys.exit(1)
+    print(res)
+
 
 @cli.group()
 @click.pass_context
@@ -109,6 +209,8 @@ def do_endpoint_list(ctx: dict, platform: str):
         endpoints = obj["reply"]["endpoints"]
         offset +=  obj["reply"]["result_count"]
         total_count = obj["reply"]["total_count"]
+        params["request_data"]["search_from"] = offset
+        params["request_data"]["search_to"] = offset+100
         yield from endpoints
 
 @endpoint.command("get")
