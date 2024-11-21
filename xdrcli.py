@@ -122,7 +122,7 @@ def do_list_incidents(ctx):
 @click.pass_context
 def list_incidents(ctx):
     for incident in do_list_incidents(ctx):
-        print(json.dumps(incident))
+        click.echo(json.dumps(incident))
 
 @incident.command("get")
 @click.argument("incident_id")
@@ -131,7 +131,7 @@ def get_incident(ctx, incident_id: str):
     params = dict(request_data=dict(incident_id=incident_id))
     res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
     obj = res.json()
-    print(json.dumps(obj["reply"]))
+    click.echo(json.dumps(obj["reply"]))
 
 @incident.command("close")
 @click.argument("incident_id")
@@ -139,7 +139,7 @@ def get_incident(ctx, incident_id: str):
 def close_incident(ctx, incident_id: str):
     params = dict(request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved"))
     res = do_requests_post(ctx, "incidents/update_incidents", params)
-    print(res)
+    click.echo(res)
 
 @cli.group()
 @click.pass_context
@@ -156,7 +156,7 @@ def do_alert_list(ctx):
 @click.pass_context
 def list_alerts(ctx):
     for alert in do_alert_list(ctx):
-        print(json.dumps(alert))
+        click.echo(json.dumps(alert))
 
 @alert.command("close")
 @click.argument("alert_id", type=int, nargs=-1)
@@ -465,7 +465,7 @@ def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel
         workbook.close()
     else:
        for r in results:
-           print(r)
+           click.echo(r)
 
 
 
