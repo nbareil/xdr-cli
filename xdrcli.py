@@ -66,6 +66,9 @@ def generate_auth_headers(api_key_id, api_key) -> dict:
     return headers
 
 
+class XDRException(Exception):
+    pass
+
 def do_requests_post(
     ctx: dict, uri: str, parameters: dict = {}, headers: dict = {}
 ) -> requests.Response:
@@ -74,6 +77,8 @@ def do_requests_post(
     )
     url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
     res = requests.post(url, headers=headers, json=parameters)
+    if res.status_code != 200:
+        raise XDRException(f"{uri} failed with {res.status_code}: {res.reason} {res.text}")
     return res
 
 @cli.group()
@@ -90,22 +95,22 @@ def close_incident(ctx):
     pass
 
 
-def do_list_incidents(ctx):
-    params = dict(request_data=dict())
+def do_paginated_post_request(ctx, uri:str , params: dict):
     offset = -1
     total_count = 0
     while offset < total_count:
-        res = do_requests_post(ctx, "incidents/get_incidents", params)
-        if res.status_code != 200:
-            logger.error(f"incidents/get_incidents failed with {res.status_code}: {res.reason} {res.text}")
-            sys.exit(1)
+        res = do_requests_post(ctx, uri, params)
         obj = res.json()
-        incidents = obj["reply"]["incidents"]
+        yield obj
         offset +=  obj["reply"]["result_count"]
         total_count = obj["reply"]["total_count"]
         params["request_data"]["search_from"] = offset
         params["request_data"]["search_to"] = offset+100
-        yield from incidents
+
+def do_list_incidents(ctx):
+    params = dict(request_data=dict())
+    for obj in do_paginated_post_request(ctx, "incidents/get_incidents", params):
+        yield obj["reply"]["incidents"]
 
 @incident.command("list")
 @click.pass_context
@@ -119,9 +124,6 @@ def list_incidents(ctx):
 def get_incident(ctx, incident_id: str):
     params = dict(request_data=dict(incident_id=incident_id))
     res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
-    if res.status_code != 200:
-        logger.error(f"incidents/get_incident_extra_data failed with {res.status_code}: {res.reason} {res.text}")
-        sys.exit(1)
     obj = res.json()
     print(json.dumps(obj["reply"]))
 
@@ -140,26 +142,14 @@ def alert(ctx):
 
 def do_alert_list(ctx):
     params = dict(request_data=dict())
-    offset = -1
-    total_count = 0
-    while offset < total_count:
-        res = do_requests_post(ctx, "alerts/get_alerts", params)
-        if res.status_code != 200:
-            logger.error(f"alerts/get_alerts failed with {res.status_code}: {res.reason} {res.text}")
-            sys.exit(1)
-        obj = res.json()
+    for obj in do_paginated_post_request(ctx, "alerts/get_alerts", params):
         alerts = obj["reply"]["alerts"]
-        offset +=  obj["reply"]["result_count"]
-        total_count = obj["reply"]["total_count"]
-        params["request_data"]["search_from"] = offset
-        params["request_data"]["search_to"] = offset+100
         yield from alerts
 
 @alert.command("list")
 @click.pass_context
 def list_alerts(ctx):
-    for alert in do_alerts_list(ctx):
-        #print(alert["alert_id"])
+    for alert in do_alert_list(ctx):
         print(json.dumps(alert))
 
 @alert.command("close")
@@ -167,13 +157,7 @@ def list_alerts(ctx):
 @click.pass_context
 def close_alert(ctx, alert_id: List[int]):
     params = dict(request_data=dict(alert_id_list=alert_id, update_data=dict(status="resolved_other")))
-    print(params)
     res = do_requests_post(ctx, "alerts/update_alerts", params)
-    if res.status_code != 200:
-        logger.error(f"alerts/update_alerts failed with {res.status_code}: {res.reason} {res.text}")
-        sys.exit(1)
-    print(res)
-
 
 @cli.group()
 @click.pass_context
@@ -198,19 +182,8 @@ def do_endpoint_list(ctx: dict, platform: str):
             "operator": "in",
             "value": [platform]
         })
-    total_count = 1
-    offset = 0
-    while offset < total_count:
-        res = do_requests_post(ctx, "endpoints/get_endpoint", params)
-        if res.status_code != 200:
-            logger.error(f"endpoints/get_endpoint failed with {res.status_code}: {res.reason} {res.text}")
-            sys.exit(1)
-        obj = res.json()
+    for obj in do_paginated_post_request(ctx, "endpoints/get_endpoint", params):
         endpoints = obj["reply"]["endpoints"]
-        offset +=  obj["reply"]["result_count"]
-        total_count = obj["reply"]["total_count"]
-        params["request_data"]["search_from"] = offset
-        params["request_data"]["search_to"] = offset+100
         yield from endpoints
 
 @endpoint.command("get")
@@ -236,9 +209,6 @@ def do_endpoint_get(ctx: dict, hostname: str):
         }
     }
     res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
-    if res.status_code != 200:
-        click.echo(res.status_code, res.reason)
-        sys.exit(1)
     obj = res.json()
     if obj.get("reply", {}).get("total_count", 0) == 0:
         click.echo("No match")
@@ -261,9 +231,6 @@ def endpoint_who_has(ctx: dict, ip: str, raw: bool = False):
         }
     }
     res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
-    if res.status_code != 200:
-        click.echo(res.status_code, res.reason)
-        sys.exit(1)
     obj = res.json()
     if obj.get("reply", {}).get("total_count", 0) == 0:
         click.echo("No match")
