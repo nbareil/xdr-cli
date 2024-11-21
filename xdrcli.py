@@ -21,20 +21,26 @@ from datetime import datetime, timezone
 AUTH_FILE = os.path.join(os.environ.get("HOME"), ".xdr-cli-auth.json")
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.ERROR)
 
 @click.group()
 @click.option("--verbose", default=False, help="Verbose mode", is_flag=True)
+@click.option("--debug", default=False, help="Debug mode", is_flag=True)
 @click.option("--base-url", default="", help="Base URL to XDR tenant")
 @click.option("--api-key-id", default="", help="API Key ID")
 @click.option("--api-key-hash", default="", help="API Key Hash")
 @click.option("--profile", "-p", default="", help="Select XDR tenant")
 @click.pass_context
-def cli(ctx, base_url, verbose, api_key_id, api_key_hash, profile):
+def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
     # ensure that ctx.obj exists and is a dict (in case `cli()` is called
     # by means other than the `if` block below)
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+    ctx.obj["debug"] = debug
+    if verbose:
+        logging.basicConfig(level=logging.INFO)
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
     if profile:
         profiles = json.load(open(AUTH_FILE))
         if profile in profiles:
