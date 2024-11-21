@@ -23,6 +23,7 @@ AUTH_FILE = os.path.join(os.environ.get("HOME"), ".xdr-cli-auth.json")
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.ERROR)
 
+
 @click.group()
 @click.option("--verbose", default=False, help="Verbose mode", is_flag=True)
 @click.option("--debug", default=False, help="Debug mode", is_flag=True)
@@ -75,6 +76,7 @@ def generate_auth_headers(api_key_id, api_key) -> dict:
 class XDRException(Exception):
     pass
 
+
 def do_requests_post(
     ctx: dict, uri: str, parameters: dict = {}, headers: dict = {}
 ) -> requests.Response:
@@ -84,45 +86,53 @@ def do_requests_post(
     url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
     res = requests.post(url, headers=headers, json=parameters)
     if res.status_code != 200:
-        raise XDRException(f"{uri} failed with {res.status_code}: {res.reason} {res.text}")
+        raise XDRException(
+            f"{uri} failed with {res.status_code}: {res.reason} {res.text}"
+        )
     return res
+
 
 @cli.group()
 @click.pass_context
 def incident(ctx):
     pass
 
+
 @incident.command("get")
 def get_incident(ctx):
     pass
+
 
 @incident.command("close")
 def close_incident(ctx):
     pass
 
 
-def do_paginated_post_request(ctx, uri:str , params: dict):
+def do_paginated_post_request(ctx, uri: str, params: dict):
     offset = -1
     total_count = 0
     while offset < total_count:
         res = do_requests_post(ctx, uri, params)
         obj = res.json()
         yield obj
-        offset +=  obj["reply"]["result_count"]
+        offset += obj["reply"]["result_count"]
         total_count = obj["reply"]["total_count"]
         params["request_data"]["search_from"] = offset
-        params["request_data"]["search_to"] = offset+100
+        params["request_data"]["search_to"] = offset + 100
+
 
 def do_list_incidents(ctx):
     params = dict(request_data=dict())
     for obj in do_paginated_post_request(ctx, "incidents/get_incidents", params):
         yield obj["reply"]["incidents"]
 
+
 @incident.command("list")
 @click.pass_context
 def list_incidents(ctx):
     for incident in do_list_incidents(ctx):
         click.echo(json.dumps(incident))
+
 
 @incident.command("get")
 @click.argument("incident_id")
@@ -133,18 +143,23 @@ def get_incident(ctx, incident_id: str):
     obj = res.json()
     click.echo(json.dumps(obj["reply"]))
 
+
 @incident.command("close")
 @click.argument("incident_id")
 @click.pass_context
 def close_incident(ctx, incident_id: str):
-    params = dict(request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved"))
+    params = dict(
+        request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved")
+    )
     res = do_requests_post(ctx, "incidents/update_incidents", params)
     click.echo(res)
+
 
 @cli.group()
 @click.pass_context
 def alert(ctx):
     pass
+
 
 def do_alert_list(ctx):
     params = dict(request_data=dict())
@@ -152,18 +167,25 @@ def do_alert_list(ctx):
         alerts = obj["reply"]["alerts"]
         yield from alerts
 
+
 @alert.command("list")
 @click.pass_context
 def list_alerts(ctx):
     for alert in do_alert_list(ctx):
         click.echo(json.dumps(alert))
 
+
 @alert.command("close")
 @click.argument("alert_id", type=int, nargs=-1)
 @click.pass_context
 def close_alert(ctx, alert_id: List[int]):
-    params = dict(request_data=dict(alert_id_list=alert_id, update_data=dict(status="resolved_other")))
+    params = dict(
+        request_data=dict(
+            alert_id_list=alert_id, update_data=dict(status="resolved_other")
+        )
+    )
     res = do_requests_post(ctx, "alerts/update_alerts", params)
+
 
 @cli.group()
 @click.pass_context
@@ -172,7 +194,12 @@ def endpoint(ctx):
 
 
 @endpoint.command("list")
-@click.option("--platform", "-p", help="Filter by platform name: linux, windows, macos, android", type=str)
+@click.option(
+    "--platform",
+    "-p",
+    help="Filter by platform name: linux, windows, macos, android",
+    type=str,
+)
 @click.pass_context
 def endpoint_list(ctx: dict, platform: str = None):
     """Get more information about an endpoint"""
@@ -180,17 +207,17 @@ def endpoint_list(ctx: dict, platform: str = None):
     for endpoint in endpoints:
         click.echo(json.dumps(endpoint, indent=4))
 
+
 def do_endpoint_list(ctx: dict, platform: str):
     params = dict(request_data=dict(filters=[]))
     if platform:
-        params["request_data"]["filters"].append({
-            "field": "platform",
-            "operator": "in",
-            "value": [platform]
-        })
+        params["request_data"]["filters"].append(
+            {"field": "platform", "operator": "in", "value": [platform]}
+        )
     for obj in do_paginated_post_request(ctx, "endpoints/get_endpoint", params):
         endpoints = obj["reply"]["endpoints"]
         yield from endpoints
+
 
 @endpoint.command("get")
 @click.argument("hostname")
@@ -204,6 +231,7 @@ def endpoint_get(ctx: dict, hostname: str, field: str = None):
             click.echo(endpoint.get(field, "N/A"))
         else:
             click.echo(json.dumps(endpoint, indent=4))
+
 
 def do_endpoint_get(ctx: dict, hostname: str):
     # click.echo(hostname)
@@ -373,23 +401,42 @@ def retrieve_file(ctx, output, action_id, endpoint_id):
     output.write(res.content)
     output.close()
 
+
 def open_editor():
     # ripped from https://stackoverflow.com/a/19377899
     with tempfile.NamedTemporaryFile() as tmpfile:
-        subprocess.call( [ os.environ.get('EDITOR', None) or 'vim', tmpfile.name ] )
+        subprocess.call([os.environ.get("EDITOR", None) or "vim", tmpfile.name])
 
-        with open( tmpfile.name, 'r' ) as f:
+        with open(tmpfile.name, "r") as f:
             data = f.read()
     return data
 
+
 @cli.command
-@click.option("--begin-time", type=click.DateTime(), default=None, help="Begin of the timeframe")
-@click.option("--end-time", type=click.DateTime(), default=None, help="End of the timeframe")
-@click.option("--output", type=click.Path(exists=False), default=None, help="Output", required=True)
+@click.option(
+    "--begin-time", type=click.DateTime(), default=None, help="Begin of the timeframe"
+)
+@click.option(
+    "--end-time", type=click.DateTime(), default=None, help="End of the timeframe"
+)
+@click.option(
+    "--output",
+    type=click.Path(exists=False),
+    default=None,
+    help="Output",
+    required=True,
+)
 @click.option("--excel", is_flag=True, help="Format output as Excel file")
 @click.argument("xql_query", type=str)
 @click.pass_context
-def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel: bool = False, output: str = ""):
+def xql(
+    ctx,
+    xql_query: str,
+    begin_time: str = None,
+    end_time: str = None,
+    excel: bool = False,
+    output: str = "",
+):
     """Execute an XQL query"""
 
     if not xql_query:
@@ -410,12 +457,12 @@ def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel
     res = res.json()
     query_id = res.get("reply")
     logger.debug(query_id)
-    #query_id = "63c07a3d8fce42_16299_inv"
+    # query_id = "63c07a3d8fce42_16299_inv"
     params = {
         "request_data": {
             "query_id": query_id,
             "format": "json",
-            "pending_flag": False # Be synchronous (i.e. blocking)
+            "pending_flag": False,  # Be synchronous (i.e. blocking)
         }
     }
     res = do_requests_post(ctx, "xql/get_query_results", params)
@@ -424,19 +471,21 @@ def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel
         logger.error("xql/get_query_results failed: " + res.text)
         sys.exit(1)
     if resp.get("number_of_results", 0) <= 1000:
-        results = [json.dumps(entry) for entry in resp.get("results", {}).get("data", [])]
+        results = [
+            json.dumps(entry) for entry in resp.get("results", {}).get("data", [])
+        ]
     else:
         logger.debug("Need to switch to the stream version")
         params = {
             "request_data": {
                 "stream_id": resp.get("results").get("stream_id"),
-                "is_gzip_compressed": False
+                "is_gzip_compressed": False,
             }
         }
         logger.debug(params)
 
         headers = generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
-        #headers["Accept-Encoding"] = "gzip"
+        # headers["Accept-Encoding"] = "gzip"
         uri = "xql/get_query_results_stream"
         url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
         with requests.post(url, json=params, headers=headers, stream=True) as r:
@@ -447,6 +496,7 @@ def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel
 
     if excel:
         import xlsxwriter
+
         workbook = xlsxwriter.Workbook(output)
         worksheet = workbook.add_worksheet()
         results = map(json.loads, results)
@@ -464,9 +514,8 @@ def xql(ctx, xql_query: str, begin_time: str = None, end_time: str = None, excel
                 worksheet.write(row, i, r.get(col, ""))
         workbook.close()
     else:
-       for r in results:
-           click.echo(r)
-
+        for r in results:
+            click.echo(r)
 
 
 if __name__ == "__main__":
