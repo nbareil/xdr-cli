@@ -9,6 +9,7 @@ import time
 import sys
 import string
 import secrets
+from typing_extensions import Dict
 
 import requests
 import click
@@ -50,16 +51,16 @@ def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
             ctx.obj["api_key_hash"] = profiles[profile]["api_key_hash"]
         else:
             logger.error(
-                "This profile does not exist, please use one of the followings:\n" +
-                "\n".join(map(lambda s: f" - {s}", profiles))
+                "This profile does not exist, please use one of the followings:\n"
+                + "\n".join(map(lambda s: f" - {s}", profiles))
             )
             sys.exit(2)
     else:
         ctx.obj["base_url"] = base_url
         ctx.obj["api_key_id"] = api_key_id
         ctx.obj["api_key_hash"] = api_key_hash
-    # if not(all([ctx.obj['base_url'], ctx.obj['api_key_id'], ctx.obj['api_key_hash']])):
-    #    click.echo("Missing authentication bits")
+    if not (all([ctx.obj["base_url"], ctx.obj["api_key_id"], ctx.obj["api_key_hash"]])):
+        click.echo("Missing authentication bits")
 
 
 def generate_auth_headers(api_key_id, api_key) -> dict:
@@ -84,7 +85,7 @@ class XDRException(Exception):
 
 
 def do_requests_post(
-    ctx: dict, uri: str, parameters: dict = {}, headers: dict = {}
+    ctx: click.Context, uri: str, parameters: dict = {}, headers: dict = {}
 ) -> requests.Response:
     headers.update(
         **generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
@@ -104,7 +105,7 @@ def incident(ctx):
     pass
 
 
-def do_paginated_post_request(ctx, uri: str, params: dict):
+def do_paginated_post_request(ctx: click.Context, uri: str, params: dict):
     offset = -1
     total_count = 0
     while offset < total_count:
@@ -117,7 +118,7 @@ def do_paginated_post_request(ctx, uri: str, params: dict):
         params["request_data"]["search_to"] = offset + 100
 
 
-def do_list_incidents(ctx):
+def do_list_incidents(ctx: click.Context):
     params = dict(request_data=dict())
     for obj in do_paginated_post_request(ctx, "incidents/get_incidents", params):
         yield obj["reply"]["incidents"]
@@ -125,7 +126,7 @@ def do_list_incidents(ctx):
 
 @incident.command("list")
 @click.pass_context
-def list_incidents(ctx):
+def list_incidents(ctx: click.Context):
     for incident in do_list_incidents(ctx):
         click.echo(json.dumps(incident))
 
@@ -133,7 +134,7 @@ def list_incidents(ctx):
 @incident.command("get")
 @click.argument("incident_id")
 @click.pass_context
-def get_incident(ctx, incident_id: str) -> None:
+def get_incident(ctx: click.Context, incident_id: str) -> None:
     params = dict(request_data=dict(incident_id=incident_id))
     res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
     obj = res.json()
@@ -143,7 +144,7 @@ def get_incident(ctx, incident_id: str) -> None:
 @incident.command("close")
 @click.argument("incident_id")
 @click.pass_context
-def close_incident(ctx, incident_id: str):
+def close_incident(ctx: click.Context, incident_id: str):
     params = dict(
         request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved")
     )
@@ -157,7 +158,7 @@ def alert(ctx):
     pass
 
 
-def do_alert_list(ctx):
+def do_alert_list(ctx: click.Context):
     params = dict(request_data=dict())
     for obj in do_paginated_post_request(ctx, "alerts/get_alerts", params):
         alerts = obj["reply"]["alerts"]
@@ -166,7 +167,7 @@ def do_alert_list(ctx):
 
 @alert.command("list")
 @click.pass_context
-def list_alerts(ctx):
+def list_alerts(ctx: click.Context):
     for alert in do_alert_list(ctx):
         click.echo(json.dumps(alert))
 
@@ -174,7 +175,7 @@ def list_alerts(ctx):
 @alert.command("close")
 @click.argument("alert_id", type=int, nargs=-1)
 @click.pass_context
-def close_alert(ctx, alert_id: List[int]):
+def close_alert(ctx: click.Context, alert_id: List[int]):
     params = dict(
         request_data=dict(
             alert_id_list=alert_id, update_data=dict(status="resolved_other")
@@ -185,7 +186,7 @@ def close_alert(ctx, alert_id: List[int]):
 
 @cli.group()
 @click.pass_context
-def endpoint(ctx):
+def endpoint(ctx: click.Context):
     pass
 
 
@@ -197,14 +198,14 @@ def endpoint(ctx):
     type=str,
 )
 @click.pass_context
-def endpoint_list(ctx: dict, platform: str = ""):
+def endpoint_list(ctx: click.Context, platform: str = ""):
     """Get more information about an endpoint"""
     endpoints = do_endpoint_list(ctx, platform)
     for endpoint in endpoints:
         click.echo(json.dumps(endpoint, indent=4))
 
 
-def do_endpoint_list(ctx: dict, platform: str):
+def do_endpoint_list(ctx: click.Context, platform: str):
     params = dict(request_data=dict(filters=[]))
     if platform:
         params["request_data"]["filters"].append(
@@ -219,7 +220,7 @@ def do_endpoint_list(ctx: dict, platform: str):
 @click.argument("hostname")
 @click.option("--field", "-f", help="Return only this field", type=str)
 @click.pass_context
-def endpoint_get(ctx: dict, hostname: str, field: str = None):
+def endpoint_get(ctx: click.Context, hostname: str, field: str = None):
     """Get more information about an endpoint"""
     endpoints = do_endpoint_get(ctx, hostname)
     for endpoint in endpoints:
@@ -229,7 +230,7 @@ def endpoint_get(ctx: dict, hostname: str, field: str = None):
             click.echo(json.dumps(endpoint, indent=4))
 
 
-def do_endpoint_get(ctx: dict, hostname: str):
+def do_endpoint_get(ctx: click.Context, hostname: str):
     # click.echo(hostname)
     parameters = {
         "request_data": {
@@ -250,7 +251,7 @@ def do_endpoint_get(ctx: dict, hostname: str):
 @click.argument("ip")
 @click.option("--raw", is_flag=True, help="Display the whole endpoint object")
 @click.pass_context
-def endpoint_who_has(ctx: dict, ip: str, raw: bool = False):
+def endpoint_who_has(ctx: click.Context, ip: str, raw: bool = False):
     """Resolve an IP address to a hostname"""
     # click.echo(hostname)
     parameters = {
@@ -335,7 +336,7 @@ def remove(name: str):
 @click.option("--output", "-o", type=click.File("wb"), required=True)
 @click.argument("path", nargs=-1)
 @click.pass_context
-def get_file(ctx, endpoint_id: str, path: List[str], output, hostname):
+def get_file(ctx: click.Context, endpoint_id: str, path: List[str], output, hostname):
     """Retrieve a file from an endpoint."""
     if hostname:
         endpoints = do_endpoint_get(ctx, hostname)
@@ -379,7 +380,7 @@ def get_file(ctx, endpoint_id: str, path: List[str], output, hostname):
     retrieve_file(ctx, output, action_id, endpoint_id)
 
 
-def get_action_status(ctx, action_id, endpoint_id) -> str:
+def get_action_status(ctx: click.Context, action_id, endpoint_id) -> str:
     # PENDING IN_PROGRESS CANCELLED PENDING_ABORT ABORTED EXPIRED
     # COMPLETED_PARTIAL COMPLETED_SUCCESSFULLY FAILED TIMEOUT
     params = dict(request_data=dict(group_action_id=action_id))
@@ -388,7 +389,7 @@ def get_action_status(ctx, action_id, endpoint_id) -> str:
     return res.get("reply", {}).get("data", {}).get(endpoint_id, "")
 
 
-def retrieve_file(ctx, output, action_id, endpoint_id):
+def retrieve_file(ctx: click.Context, output, action_id, endpoint_id):
     params = {"request_data": {"group_action_id": action_id}}
     res = do_requests_post(ctx, "actions/file_retrieval_details", params)
     ret = res.json()
@@ -429,7 +430,7 @@ def open_editor():
 @click.argument("xql_query", type=str)
 @click.pass_context
 def xql(
-    ctx,
+    ctx: click.Context,
     xql_query: str,
     begin_time: str = None,
     end_time: str = None,
