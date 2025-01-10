@@ -103,7 +103,7 @@ $ for id in $(xdr-cli --profile demo endpoint list --platform linux|jq .endpoint
 done
 ```
 
-## Execute XQL commands
+### Execute XQL commands
 
 You can execute XQL queries from the command-line:
 
