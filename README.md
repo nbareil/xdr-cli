@@ -80,7 +80,7 @@ List hosts having the tag XXX:
 $ xdr-cli --profile demo endpoint list| jq 'select(.tag|contains("XXX")) | .endpoint_name'
 ```
 
-### Acquire a file on host
+## Acquire a file on host
 
 ```
 $ xdr-cli --profile=demo get-file --hostname DESKTOP-V24D23 'C:\Temp\NetMonitor.exe' -o /tmp/net_monitor.zip
@@ -92,7 +92,7 @@ If you are going to acquire a large number of files, a slight optimization is to
 $ xdr-cli --profile=demo get-file --endpoint-id 1bd16395ef5a44a1db13033e461d012a /usr/local/bin/evil_service -o /tmp/evil_service.zip
 ```
 
-### Bulk acquisition of files
+## Bulk acquisition of files
 
 
 Let's say you need to acquire a specific file on all Linux hosts, use the following loop:
@@ -103,7 +103,7 @@ $ for id in $(xdr-cli --profile demo endpoint list --platform linux|jq .endpoint
 done
 ```
 
-### Execute XQL commands
+## Execute XQL commands
 
 You can execute XQL queries from the command-line:
 
