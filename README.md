@@ -4,6 +4,9 @@ Interact with XDR using the command-line.
 
 All platforms are supported: Linux, Mac, and Windows.
 
+
+[[_TOC_]
+
 ## Installation
 
 ```
