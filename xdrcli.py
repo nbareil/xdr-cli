@@ -48,6 +48,12 @@ def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
             ctx.obj["base_url"] = profiles[profile]["base_url"]
             ctx.obj["api_key_id"] = profiles[profile]["api_key_id"]
             ctx.obj["api_key_hash"] = profiles[profile]["api_key_hash"]
+        else:
+            logger.error(
+                "This profile does not exist, please use one of the followings:\n" +
+                "\n".join(map(lambda s: f" - {s}", profiles))
+            )
+            sys.exit(2)
     else:
         ctx.obj["base_url"] = base_url
         ctx.obj["api_key_id"] = api_key_id
@@ -98,16 +104,6 @@ def incident(ctx):
     pass
 
 
-@incident.command("get")
-def get_incident(ctx):
-    pass
-
-
-@incident.command("close")
-def close_incident(ctx):
-    pass
-
-
 def do_paginated_post_request(ctx, uri: str, params: dict):
     offset = -1
     total_count = 0
@@ -137,7 +133,7 @@ def list_incidents(ctx):
 @incident.command("get")
 @click.argument("incident_id")
 @click.pass_context
-def get_incident(ctx, incident_id: str):
+def get_incident(ctx, incident_id: str) -> None:
     params = dict(request_data=dict(incident_id=incident_id))
     res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
     obj = res.json()
@@ -201,7 +197,7 @@ def endpoint(ctx):
     type=str,
 )
 @click.pass_context
-def endpoint_list(ctx: dict, platform: str = None):
+def endpoint_list(ctx: dict, platform: str = ""):
     """Get more information about an endpoint"""
     endpoints = do_endpoint_list(ctx, platform)
     for endpoint in endpoints:
@@ -303,9 +299,12 @@ def add(name: str):
         click.confirm(
             f"This tenant {name} already exists, should I update it?", abort=True
         )
-    api_key_id = click.prompt("API Key ID", type=int)
-    api_key_hash = click.prompt("API Key Hash", type=str)
     base_url = click.prompt("Base URL (without https://)", type=str)
+    click.echo(
+        f"Create an Advanced API key manually on https://{base_url}/configuration/api-keys then:\n"
+    )
+    api_key_hash = click.prompt("API Key Hash", type=str)
+    api_key_id = click.prompt("API Key ID", type=int)
     tenants[name] = dict(
         api_key_id=api_key_id, api_key_hash=api_key_hash, base_url=base_url
     )
@@ -457,7 +456,6 @@ def xql(
     res = res.json()
     query_id = res.get("reply")
     logger.debug(query_id)
-    # query_id = "63c07a3d8fce42_16299_inv"
     params = {
         "request_data": {
             "query_id": query_id,
