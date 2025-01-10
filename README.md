@@ -65,7 +65,7 @@ for incident_id in $incidents; do
 done
 ```
 
-## Get a list of hosts matching conditions
+### Get a list of hosts matching conditions
 
 List Linux hosts:
 
@@ -80,7 +80,7 @@ List hosts having the tag XXX:
 $ xdr-cli --profile demo endpoint list| jq 'select(.tag|contains("XXX")) | .endpoint_name'
 ```
 
-## Acquire a file on host
+### Acquire a file on host
 
 ```
 $ xdr-cli --profile=demo get-file --hostname DESKTOP-V24D23 'C:\Temp\NetMonitor.exe' -o /tmp/net_monitor.zip
@@ -92,7 +92,7 @@ If you are going to acquire a large number of files, a slight optimization is to
 $ xdr-cli --profile=demo get-file --endpoint-id 1bd16395ef5a44a1db13033e461d012a /usr/local/bin/evil_service -o /tmp/evil_service.zip
 ```
 
-## Bulk acquisition of files
+### Bulk acquisition of files
 
 
 Let's say you need to acquire a specific file on all Linux hosts, use the following loop:
@@ -101,4 +101,33 @@ Let's say you need to acquire a specific file on all Linux hosts, use the follow
 $ for id in $(xdr-cli --profile demo endpoint list --platform linux|jq .endpoint_id); do
   xdr-cli --profile demo get-file --endpoint-id "$id" '/root/.bash_history' -o /tmp/collections/
 done
+```
+
+## Execute XQL commands
+
+You can execute XQL queries from the command-line:
+
+```
+$ xdr-cli --profile demo xql "dataset = xdr_data| filter action_process_username ~= "root"| fields _time,action_process_image_name'
+```
+
+By default, the JSON results will be output directly on the standard output in order for you to be able to pipe it to JQ and perform some magic voodo.
+
+But if you are more an Excel master, you may enjoy the `--excel` flag that directly converts the ouptut to a full blown XLSX sheet:
+
+```
+$ xql_query='dataset = xdr_data| filter action_process_username ~= "root"| fields _time,action_process_image_name'
+$ xdr-cli --profile demo xql  --excel -o my_sheet.xlsx  "$xql_query"'
+```
+
+You can also specify the dates as parameters:
+
+```
+$ xdr-cli --profile=demo  xql "$xql_query" --begin-time "2023-09-01 00:00:00" --end-time "2024-09-30 11:00:00"
+```
+
+And you are not even required to type the XQL query in the parameter, if you don't specify one, xdr-cli will automatically open your favorite text editor. The query will be automatically executed when you exit it:
+
+```
+$ xdr-cli --profile=demo xlq
 ```

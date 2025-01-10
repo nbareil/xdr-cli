@@ -9,7 +9,7 @@ import time
 import sys
 import string
 import secrets
-from typing_extensions import Dict
+from typing import Optional
 
 import requests
 import click
@@ -423,21 +423,23 @@ def open_editor():
     "--output",
     type=click.Path(exists=False),
     default=None,
-    help="Output",
-    required=True,
+    help="Output"
 )
 @click.option("--excel", is_flag=True, help="Format output as Excel file")
-@click.argument("xql_query", type=str)
+@click.argument("xql_query", type=str, default="")
 @click.pass_context
 def xql(
     ctx: click.Context,
-    xql_query: str,
-    begin_time: str = None,
-    end_time: str = None,
+    xql_query: Optional[str],
+    begin_time: str = "",
+    end_time: str = "",
     excel: bool = False,
     output: str = "",
 ):
     """Execute an XQL query"""
+    if excel and not output:
+        logger.error("You have selected Excel output but you did not specify a path where to write results (use --output!)")
+        sys.exit(3)
 
     if not xql_query:
         xql_query = open_editor()

@@ -1,9 +1,9 @@
 [project]
 name = "xdr-cli"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pilot Cortex XDR from the command-line"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 dependencies = [
  "click",
  "xlsxwriter",
@@ -11,5 +11,4 @@ dependencies = [
 ]
 
 [project.scripts]
-xdr-cli = "xdrcli:cli"
-
+xdr-cli = "xdr_cli.xdr_cli:cli"
