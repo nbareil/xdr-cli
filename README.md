@@ -7,7 +7,7 @@ All platforms are supported: Linux, Mac, and Windows.
 
 [[_TOC_]]
 
-## Installation
+# Installation
 
 ```
 $ git clone https://github.com/nbareil/xdr-cli.git
@@ -16,7 +16,7 @@ $ pip install .
 $ xdr-cli --help
 ```
 
-## Getting started
+# Getting started
 
 xdrcli is designed to be used with many tenants at the same time, in order for you to juggle easily between customers. For each client, you will define an alias name and specify the full URL and the API key and Identifier.
 
@@ -39,9 +39,9 @@ Now, you are good to go:
 $ xdr-cli --profile demo incident list
 ```
 
-## Examples
+# Examples
 
-### Closing all alerts related to a given Alert name
+## Closing all alerts related to a given Alert name
 
 In the following snippet, in the context of a CTF, we wanted to remove the 50k alerts that were raised quite rightly by Cortex XDR about CobaltStrike BEACON traffic to makes things easier for the students:
 
@@ -65,7 +65,7 @@ for incident_id in $incidents; do
 done
 ```
 
-### Get a list of hosts matching conditions
+## Get a list of hosts matching conditions
 
 List Linux hosts:
 
