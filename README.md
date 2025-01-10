@@ -8,7 +8,7 @@ All platforms are supported: Linux, Mac, and Windows.
 
 ```
 $ git clone https://github.com/nbareil/xdr-cli.git
-$ cd xdrcli
+$ cd xdr-cli
 $ pip install .
 $ xdr-cli --help
 ```
@@ -87,4 +87,15 @@ If you are going to acquire a large number of files, a slight optimization is to
 
 ```
 $ xdr-cli --profile=demo get-file --endpoint-id 1bd16395ef5a44a1db13033e461d012a /usr/local/bin/evil_service -o /tmp/evil_service.zip
+```
+
+## Bulk acquisition of files
+
+
+Let's say you need to acquire a specific file on all Linux hosts, use the following loop:
+
+```
+$ for id in $(xdr-cli --profile demo endpoint list --platform linux|jq .endpoint_id); do
+  xdr-cli --profile demo get-file --endpoint-id "$id" '/root/.bash_history' -o /tmp/collections/
+done
 ```
