@@ -1,4 +1,4 @@
-# xdrcli
+# xdr-cli
 
 Interact with XDR using the command-line.
 
