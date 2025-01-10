@@ -1,2 +1,0 @@
-[console_scripts]
-xdr-cli = xdr_cli.xdr_cli:cli
