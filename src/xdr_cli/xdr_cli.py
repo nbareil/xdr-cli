@@ -204,6 +204,26 @@ def build_py_script_from_yara(yara):
     return final_pyscript
 
 
+def do_script_run(ctx, name: str, script, endpoint_id: list[str], timeout: int):
+    script_content = script.read()
+    params = dict(
+        request_data={
+            "timeout": timeout,
+            "snippet_code": script_content,
+            "filters": [
+                {
+                    "field": "endpoint_id_list",
+                    "operator": "in",
+                    "value": endpoint_id,
+                },
+            ],
+        }
+    )
+    res = do_requests_post(ctx, "scripts/run_snippet_code_script", params)
+    obj = res.json()
+    click.echo(json.dumps(obj["reply"]))
+    return obj["reply"]
+
 @script.command()
 @click.pass_context
 @click.option("--name", "-n", help="Script name", type=str)
@@ -223,23 +243,7 @@ def build_py_script_from_yara(yara):
 )
 @click.argument("script", type=click.File())
 def run(ctx, name: str, script: io.FileIO, endpoint_id: list[str], timeout: int):
-    script_content = script.read()
-    params = dict(
-        request_data={
-            "timeout": timeout,
-            "snippet_code": script_content,
-            "filters": [
-                {
-                    "field": "endpoint_id_list",
-                    "operator": "in",
-                    "value": endpoint_id,
-                },
-            ],
-        }
-    )
-    res = do_requests_post(ctx, "scripts/run_snippet_code_script", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
+    return do_script_run(ctx, name, script, endpoint_id, timeout)
 
 
 @script.command
@@ -285,8 +289,18 @@ def yara_memory_scan(
         for p in platform:
             endpoint += (x["endpoint_id"] for x in do_endpoint_list(ctx, p))
 
-    if endpoint:
-        run.callback("yara_memory_scan", py_script, endpoint, 600)
+    all_action_id = []
+    endpoint_id_list = []
+    for i, endpoint_id in enumerate(endpoint):
+        endpoint_id_list.append(endpoint_id)
+        if i and (i % 1000 == 0):
+            ret = do_script_run(ctx, "yara_memory_scan", py_script, endpoint_id_list, 600)
+            all_action_id.append(ret.get("action_id"))
+            endpoint_id_list = []
+    if endpoint_id_list:
+        ret = do_script_run(ctx, "yara_memory_scan", py_script, endpoint_id_list, 600)
+        all_action_id.append(ret.get("action_id"))
+    click.echo(json.dumps(dict(actions_id=all_action_id)))
 
 
 @script.command
