@@ -1,3 +1,4 @@
+from io import FileIO
 import tempfile
 import subprocess
 import os
@@ -102,6 +103,88 @@ def do_requests_post(
 @cli.group()
 @click.pass_context
 def incident(ctx):
+    pass
+
+
+@cli.group()
+@click.pass_context
+def script(ctx):
+    pass
+
+
+@script.command()
+@click.pass_context
+@click.option("--name", "-n", help="Script name", type=str)
+@click.option(
+    "--endpoint_id",
+    "-e",
+    help="Endpoint where to execute the script",
+    type=str,
+    multiple=True,
+)
+@click.option(
+    "--timeout",
+    "-t",
+    help="Execution timeout for the script (in seconds)",
+    default=600,
+    type=int,
+)
+@click.argument("script", type=click.File())
+def run(ctx, name: str, script: FileIO, endpoint_id: list[str], timeout: int):
+    script_content = script.read()
+    params = dict(
+        request_data={
+            "timeout": timeout,
+            "snippet_code": script_content,
+            "filters": [
+                {
+                    "field": "endpoint_id_list",
+                    "operator": "in",
+                    "value": endpoint_id,
+                },
+            ],
+        }
+    )
+    res = do_requests_post(ctx, "scripts/run_snippet_code_script", params)
+    obj = res.json()
+    click.echo(json.dumps(obj["reply"]))
+
+
+@script.command
+@click.pass_context
+@click.argument("action_id", type=int)
+def results(ctx, action_id):
+    params = dict(request_data={"action_id": action_id})
+    res = do_requests_post(ctx, "scripts/get_script_execution_results", params)
+    obj = res.json()
+    click.echo(json.dumps(obj["reply"]))
+
+
+@script.command
+@click.pass_context
+@click.argument("action_id", type=int)
+def status(ctx, action_id):
+    params = dict(request_data={"action_id": action_id})
+    res = do_requests_post(ctx, "scripts/get_script_execution_status", params)
+    obj = res.json()
+    click.echo(json.dumps(obj["reply"]))
+
+
+@script.command
+@click.pass_context
+@click.argument("action_id", type=int)
+@click.argument("endpoint_id", type=str)
+def result_files(ctx, endpoint_id: str, action_id: str):
+    params = dict(request_data={"action_id": action_id, "endpoint_id": endpoint_id})
+    res = do_requests_post(ctx, "scripts/get_script_execution_results_files", params)
+    obj = res.json()
+    click.echo(json.dumps(obj["reply"]))
+
+
+@script.command
+@click.pass_context
+@click.argument("action_id", type=int)
+def get_execution_result(ctx, action_id):
     pass
 
 
@@ -419,12 +502,7 @@ def open_editor():
 @click.option(
     "--end-time", type=click.DateTime(), default=None, help="End of the timeframe"
 )
-@click.option(
-    "--output",
-    type=click.Path(exists=False),
-    default=None,
-    help="Output"
-)
+@click.option("--output", type=click.Path(exists=False), default=None, help="Output")
 @click.option("--excel", is_flag=True, help="Format output as Excel file")
 @click.argument("xql_query", type=str, default="")
 @click.pass_context
@@ -438,7 +516,9 @@ def xql(
 ):
     """Execute an XQL query"""
     if excel and not output:
-        logger.error("You have selected Excel output but you did not specify a path where to write results (use --output!)")
+        logger.error(
+            "You have selected Excel output but you did not specify a path where to write results (use --output!)"
+        )
         sys.exit(3)
 
     if not xql_query:

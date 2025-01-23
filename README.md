@@ -131,3 +131,92 @@ And you are not even required to type the XQL query in the parameter, if you don
 ```
 $ xdr-cli --profile=demo xlq
 ```
+
+## Script execution
+
+You can run execute Python scripts directly on a list of endpoint IDs:
+
+```
+$ echo 'print "Hello world"' >  hello.py
+$ xdr-cli -p demo script run -e 3ab2dfe3ded3416fad12f1c638eddf8b -e 677161eee18749df90adf0783bda9a21  hello.py
+{"action_id": 522, "status": 1, "endpoints_count": 2}
+```
+
+Then you can get its execution status using the provided Action ID:
+
+```
+% xdr-cli -p demo script status 522|jq .
+{
+  "general_status": "COMPLETED_SUCCESSFULLY",
+  "endpoints_pending": 0,
+  "endpoints_canceled": 0,
+  "endpoints_in_progress": 0,
+  "endpoints_timeout": 0,
+  "endpoints_failed": 0,
+  "endpoints_completed_successfully": 2,
+  "endpoints_pending_abort": 0,
+  "endpoints_aborted": 0,
+  "endpoints_expired": 0
+}
+```
+
+Finally, you can request the script results:
+
+```
+$ xdr-cli -p sandbox-u42 script results 522|jq .
+{
+  "script_name": "\"snippet script\"",
+  "script_description": null,
+  "script_parameters": [],
+  "date_created": "2025-01-23 08:34:28",
+  "scope": "\"pw-zzz\"and 2 other endpoint",
+  "error_message": "",
+  "results": [
+    {
+      "endpoint_name": "pw-yyy",
+      "endpoint_ip_address": [
+        "10.2.44.12"
+      ],
+      "endpoint_status": "STATUS_010_CONNECTED",
+      "domain": "demo.com",
+      "endpoint_id": "677161eee18749df90adf0783bda9a21",
+      "execution_status": "COMPLETED_SUCCESSFULLY",
+      "standard_output": "Hello world",
+      "retrieved_files": 0,
+      "failed_files": 0,
+      "retention_date": null
+    },
+    {
+      "endpoint_name": "pw-xxx",
+      "endpoint_ip_address": [
+        "10.2.45.12"
+      ],
+      "endpoint_status": "STATUS_010_CONNECTED",
+      "domain": "demo.com",
+      "endpoint_id": "3ab2dfe3ded3416fad12f1c638eddf8b",
+      "execution_status": "COMPLETED_SUCCESSFULLY",
+      "standard_output": "Hello world",
+      "retrieved_files": 0,
+      "failed_files": 0,
+      "retention_date": null
+    }
+  ]
+}
+```
+
+Or extract the output:
+
+```
+$ xdr-cli -p sandbox-u42 script results 522|jq \
+    '.results[]
+    | select(.execution_status == "COMPLETED_SUCCESSFULLY")
+    | { "endpoint_name": .endpoint_name, "standard_output": .standard_output}'
+    {
+      "endpoint_name": "pw-xxx",
+      "standard_output": "Hello world"
+    }
+    {
+      "endpoint_name": "pw-yyy",
+      "standard_output": "Hello world"
+    }
+```
