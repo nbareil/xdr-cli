@@ -12,3 +12,4 @@ dependencies = [
 
 [project.scripts]
 xdr-cli = "xdr_cli.xdr_cli:cli"
+xdr-yara-scan = "xdr_cli.xdr_cli:yara_scan"

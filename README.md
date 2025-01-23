@@ -163,7 +163,7 @@ Then you can get its execution status using the provided Action ID:
 Finally, you can request the script results:
 
 ```
-$ xdr-cli -p sandbox-u42 script results 522|jq .
+$ xdr-cli -p demo script results 522|jq .
 {
   "script_name": "\"snippet script\"",
   "script_description": null,
@@ -207,7 +207,7 @@ $ xdr-cli -p sandbox-u42 script results 522|jq .
 Or extract the output:
 
 ```
-$ xdr-cli -p sandbox-u42 script results 522|jq \
+$ xdr-cli -p demo script results 522|jq \
     '.results[]
     | select(.execution_status == "COMPLETED_SUCCESSFULLY")
     | { "endpoint_name": .endpoint_name, "standard_output": .standard_output}'
@@ -220,3 +220,25 @@ $ xdr-cli -p sandbox-u42 script results 522|jq \
       "standard_output": "Hello world"
     }
 ```
+
+## Yara memory scan
+
+Perform a memory scan of all processes using a Yara ruleset.
+
+```
+$ xdr-cli -p demo script yara-memory-scan -e 3ab2dfe3ded3416fad12f1c638eddf8b -e 677161eee18749df90adf0783bda9a21  chisel.yara
+{"action_id": 537, "status": 1, "endpoints_count": 2}
+
+$ xdr-cli -p demo script results 537
+...
+```
+
+You can also use the `--all` flag to perform the scan on all endpoints, please
+note that in this scenario, you must select a platform:
+
+```
+$ xdr-cli -p demo script yara-memory-scan --all --platform windows  chisel.yara
+...
+```
+
+

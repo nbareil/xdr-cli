@@ -1,4 +1,5 @@
-from io import FileIO
+import base64
+import io
 import tempfile
 import subprocess
 import os
@@ -112,6 +113,97 @@ def script(ctx):
     pass
 
 
+py_yara_base_script = r"""
+import base64
+import json
+import logging
+import os
+
+import yara
+import psutil
+
+yara_rules = base64.b64decode('XXX_XDR_CLI_INSERT_YARA_CONTENT_XXX').decode("utf-8")
+
+# Do not edit past this line
+# ------------------------------------------------------------------
+
+logger = logging.getLogger("xdr_yara_process_scan")
+logging.basicConfig(level=logging.ERROR)
+
+def is_expected_yara_error(err: yara.Error):
+    for arg in err.args:
+        if "access denied" in arg:
+            return True
+        elif "internal error: 47" in arg:
+            # #define ERROR_COULD_NOT_READ_PROCESS_MEMORY  47
+            # https://github.com/VirusTotal/yara/blob/master/libyara/include/yara/error.h#L94C1-L95C1
+            return True
+    return False
+
+class BytesEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, bytes):
+            return base64.b64encode(o).decode("ascii")
+        else:
+            return super().default(o)
+
+
+allow_list_exe = [
+    "C:\\Program Files\\Palo Alto Networks\\Traps\\tlaworker.exe",
+    "C:\\Program Files\\Palo Alto Networks\\Traps\\cysandbox.exe",
+    "C:\\Program Files (x86)\\ossec-agent\\wazuh-agent.exe",
+]
+
+def yara_process_scan():
+    rules = yara.compile(source=yara_rules)
+    for process in psutil.process_iter():
+        if process.pid == os.getpid():
+            # Don't scan yourself
+            continue
+        logger.debug(f"Scanning process Name={process.name()} PID={process.pid}")
+        try:
+            matches = rules.match(pid=process.pid)
+        except yara.Error as err:
+            if is_expected_yara_error(err):
+                log_func  = logger.warning
+            else:
+                log_func = logger.error
+            log_func(f"Failed to scan process name {process.name()} PID={process.pid}: Error {err=}")
+            continue
+        if not matches:
+            continue
+        if process.exe() in allow_list_exe:
+            continue
+        logger.info(f"Process Name={process.name()} PID={process.pid} matched {len(matches)} Yara rules")
+        obj = {
+            "process": {
+                "name": process.name(),
+                "pid": process.pid,
+                "ppid": process.ppid(),
+                "cmdline": process.cmdline(),
+                "exe": process.exe(),
+            }
+        }
+        for m in matches:
+            obj[m.rule] = {}
+            for (offset, str_id, matched_data) in m.strings:
+                obj[m.rule][str_id] = matched_data
+        print(json.dumps(obj, cls=BytesEncoder))
+
+
+if __name__ == "__main__":
+    yara_process_scan()
+"""
+
+
+def build_py_script_from_yara(yara):
+    b64blob = base64.b64encode(yara.read()).decode("utf-8")
+    final_pyscript = py_yara_base_script.replace(
+        "XXX_XDR_CLI_INSERT_YARA_CONTENT_XXX", b64blob
+    )
+    return final_pyscript
+
+
 @script.command()
 @click.pass_context
 @click.option("--name", "-n", help="Script name", type=str)
@@ -130,7 +222,7 @@ def script(ctx):
     type=int,
 )
 @click.argument("script", type=click.File())
-def run(ctx, name: str, script: FileIO, endpoint_id: list[str], timeout: int):
+def run(ctx, name: str, script: io.FileIO, endpoint_id: list[str], timeout: int):
     script_content = script.read()
     params = dict(
         request_data={
@@ -148,6 +240,53 @@ def run(ctx, name: str, script: FileIO, endpoint_id: list[str], timeout: int):
     res = do_requests_post(ctx, "scripts/run_snippet_code_script", params)
     obj = res.json()
     click.echo(json.dumps(obj["reply"]))
+
+
+@script.command
+@click.argument("yara_ruleset", type=click.File("rb"))
+@click.option(
+    "--all",
+    "-a",
+    help="Select all endpoints matching platform",
+    default=False,
+    is_flag=True,
+)
+@click.option(
+    "--endpoint",
+    "-e",
+    help="Execute the Yara scan only on these selected endpoints",
+    type=str,
+    multiple=True,
+)
+@click.option(
+    "--platform",
+    "-p",
+    help="Filter by platform name: linux, windows, macos, android",
+    multiple=True,
+    type=str,
+)
+@click.pass_context
+def yara_memory_scan(
+    ctx, yara_ruleset: io.FileIO, all: bool, platform: list[str], endpoint: list[str]
+):
+    if not (all or endpoint):
+        logger.error("Select --all or --endpoint to target endpoints")
+    if all and endpoint:
+        logger.error(
+            "Options --all and --endpoint are mutually exclusive, please select only one"
+        )
+        sys.exit(2)
+    if all and not platform:
+        logger.error("Option --all requires to select --platform")
+        sys.exit(3)
+    py_script = io.StringIO(build_py_script_from_yara(yara_ruleset))
+    if all:
+        endpoint = []
+        for p in platform:
+            endpoint += (x["endpoint_id"] for x in do_endpoint_list(ctx, p))
+
+    if endpoint:
+        run.callback("yara_memory_scan", py_script, endpoint, 600)
 
 
 @script.command
