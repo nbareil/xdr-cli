@@ -40,29 +40,87 @@ $ xdr-cli --profile demo incident list
 ```
 
 # Examples
-
-## Closing all alerts related to a given Alert name
-
-In the following snippet, in the context of a CTF, we wanted to remove the 50k alerts that were raised quite rightly by Cortex XDR about CobaltStrike BEACON traffic to makes things easier for the students:
-
-With the XDR logic, we have to:
-1. List the incidents matching the noisy alert
-2. For each incident, list of alerts that were raised
-3. For each alert, close it
-4. Finally, there is no alert remaining linked to the incident, close the whole incident
-
-This gives the following loop:
+## Get information about an endpoint
 
 ```
-incidents=$(xdr-cli --profile ctf incident list| jq 'select(.description|contains("Possible Beacon Traffic Detection")) | .incident_id' | sed 's/"//g')
-for incident_id in $incidents; do
-    alerts=$(xdr-cli --profile ctf incident get "$incident_id" | jq '.alerts.data[].alert_id'| sed 's/"//g')
-    echo $alerts
-    for alert_id in $alerts; do
-            xdr-cli --profile ctf alert close "$alert_id"
-    done
-    xdr-cli --profile ctf incident close "$incident_id"
-done
+% xdr-cli -p demo endpoint get bookwormvm
+{
+    "endpoint_id": "a3b8b9c6d48f4bc1bae2320bb3bda078",
+    "endpoint_name": "Bookwormvm",
+    "endpoint_type": "AGENT_TYPE_SERVER",
+    "endpoint_status": "CONNECTED",
+    "os_type": "AGENT_OS_LINUX",
+    "os_version": "10.13.0",
+    "ip": [
+        "10.0.2.15"
+    ],
+    "ipv6": [
+        "fec0::4b2:7a69:3bac:1c8e",
+        "fec0::5054:ff:fe12:3456",
+        "fec0::a0e3:78ce:18f:ef31",
+        "fec0::a4db:4946:906f:c2a7"
+    ],
+    "public_ip": "203.0.113.10",
+    "users": [
+        "root"
+    ],
+    "domain": "localdomain",
+    "alias": "",
+    "first_seen": 1737714227084,
+    "last_seen": 1737961790740,
+    "content_version": "1630-10375",
+    "installation_package": "linux amd64",
+    "active_directory": [],
+    "install_date": 1737714227112,
+    "endpoint_version": "8.6.1.129181",
+    "is_isolated": "AGENT_UNISOLATED",
+    "isolated_date": null,
+    "group_name": [],
+    "operational_status": "PROTECTED",
+    "operational_status_description": "[]",
+    "operational_status_details": [],
+    "scan_status": "SCAN_STATUS_NONE",
+    "content_release_timestamp": 1737458418000,
+    "last_content_update_time": 1737714629021,
+    "operating_system": "Debian 10.13",
+    "mac_address": [
+        "52:54:00:12:34:56"
+    ],
+    "assigned_prevention_policy": "U42 Linux Policy (Report Only) (2)",
+    "assigned_extensions_policy": "",
+    "token_hash": null,
+    "tags": {
+        "server_tags": [],
+        "endpoint_tags": []
+    },
+    "content_status": "UP_TO_DATE"
+}
+```
+
+You can then be fancy with the JSON output, for example, to programmatically get the endpoint ID:
+
+```
+$ xdr-cli -p demo endpoint get bookwormvm | jq -r .endpoint_id
+"a3b8b9c6d48f4bc1bae2320bb3bda078"
+```
+
+If you are filling in the SoD Systems' tab, you may want its IP address, domain, and OS:
+
+```
+$ xdr-cli -p demo endpoint get bookwormvm | jq  '.ip, .domain, .operating_system'
+[
+  "10.0.2.15"
+]
+"localdomain"
+"Debian 10.13"
+```
+
+
+## Get information about an IP address
+
+```
+$ xdr-cli -p sandbox-u42 endpoint who-has 10.0.2.15
+bookwormvm
 ```
 
 ## Get a list of hosts matching conditions
@@ -242,3 +300,26 @@ $ xdr-cli -p demo script yara-memory-scan --all --platform windows  chisel.yara
 ```
 
 
+## Closing all alerts related to a given Alert name
+
+In the following snippet, in the context of a CTF, we wanted to remove the 50k alerts that were raised quite rightly by Cortex XDR about CobaltStrike BEACON traffic to makes things easier for the students:
+
+With the XDR logic, we have to:
+1. List the incidents matching the noisy alert
+2. For each incident, list of alerts that were raised
+3. For each alert, close it
+4. Finally, there is no alert remaining linked to the incident, close the whole incident
+
+This gives the following loop:
+
+```
+incidents=$(xdr-cli --profile ctf incident list| jq 'select(.description|contains("Possible Beacon Traffic Detection")) | .incident_id' | sed 's/"//g')
+for incident_id in $incidents; do
+    alerts=$(xdr-cli --profile ctf incident get "$incident_id" | jq '.alerts.data[].alert_id'| sed 's/"//g')
+    echo $alerts
+    for alert_id in $alerts; do
+            xdr-cli --profile ctf alert close "$alert_id"
+    done
+    xdr-cli --profile ctf incident close "$incident_id"
+done
+```
