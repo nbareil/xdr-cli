@@ -11,7 +11,7 @@ import time
 import sys
 import string
 import secrets
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
 import click
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 # API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
 
-AUTH_FILE = os.path.join(os.environ.get("HOME"), ".xdr-cli-auth.json")
+AUTH_FILE = os.path.join(os.path.expanduser("~"), ".xdr-cli-auth.json")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.ERROR)
@@ -204,7 +204,7 @@ def build_py_script_from_yara(yara):
     return final_pyscript
 
 
-def do_script_run(ctx, name: str, script, endpoint_id: list[str], timeout: int):
+def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
     script_content = script.read()
     params = dict(
         request_data={
@@ -242,7 +242,7 @@ def do_script_run(ctx, name: str, script, endpoint_id: list[str], timeout: int):
     type=int,
 )
 @click.argument("script", type=click.File())
-def run(ctx, name: str, script: io.FileIO, endpoint_id: list[str], timeout: int):
+def run(ctx, name: str, script: io.FileIO, endpoint_id: List[str], timeout: int):
     return do_script_run(ctx, name, script, endpoint_id, timeout)
 
 
@@ -271,7 +271,7 @@ def run(ctx, name: str, script: io.FileIO, endpoint_id: list[str], timeout: int)
 )
 @click.pass_context
 def yara_memory_scan(
-    ctx, yara_ruleset: io.FileIO, all: bool, platform: list[str], endpoint: list[str]
+    ctx, yara_ruleset: io.FileIO, all: bool, platform: List[str], endpoint: List[str]
 ):
     if not (all or endpoint):
         logger.error("Select --all or --endpoint to target endpoints")
@@ -513,7 +513,7 @@ def do_get_triage_presets(ctx: click.Context):
     return obj.get("reply", {}).get("triage_presets", [])
 
 
-def do_initiate_triage(ctx: click.Context, agent_ids: list[str], collector_uuid: str):
+def do_initiate_triage(ctx: click.Context, agent_ids: List[str], collector_uuid: str):
     request_data = {"agent_ids": agent_ids}
     if collector_uuid:
         request_data["collector_uuid"] = collector_uuid
@@ -562,7 +562,7 @@ def triage_new(ctx: click.Context, hostname: str, collector_uuid: str):
 @triage.command("status")
 @click.argument("group_action_id", type=int, nargs=-1)
 @click.pass_context
-def triage_status(ctx: click.Context, group_action_id: tuple[int]):
+def triage_status(ctx: click.Context, group_action_id: Tuple[int, ...]):
     if not group_action_id:
         click.echo("Provide one or more action IDs")
         sys.exit(2)
