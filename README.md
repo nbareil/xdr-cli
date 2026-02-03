@@ -39,6 +39,27 @@ Now, you are good to go:
 $ xdr-cli --profile demo incident list
 ```
 
+# Shell completion
+
+Bash:
+
+```
+eval "$(_XDR_CLI_COMPLETE=bash_source xdr-cli)"
+```
+
+Zsh:
+
+```
+eval "$(_XDR_CLI_COMPLETE=zsh_source xdr-cli)"
+```
+
+Alternative: generate a static script and source it:
+
+```
+$ xdr-cli completion bash > ~/.xdr-cli-completion.bash
+$ xdr-cli completion zsh > ~/.xdr-cli-completion.zsh
+```
+
 # Examples
 ## Get information about an endpoint
 

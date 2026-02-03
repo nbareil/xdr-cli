@@ -432,6 +432,23 @@ def triage(ctx: click.Context):
     pass
 
 
+@cli.command("completion")
+@click.argument("shell", required=False)
+@click.pass_context
+def completion(ctx: click.Context, shell: Optional[str]):
+    if not shell:
+        shell = os.path.basename(os.environ.get("SHELL", "")).lower()
+    if shell not in ("bash", "zsh"):
+        click.echo("Shell must be bash or zsh (or set $SHELL accordingly)")
+        sys.exit(2)
+    prog_name = ctx.info_name or "xdr-cli"
+    complete_name = prog_name.replace("-", "_").replace(".", "_")
+    complete_var = f"_{complete_name}_COMPLETE".upper()
+    completion_cls = click.shell_completion.get_completion_class(shell)
+    completion = completion_cls(cli, {}, prog_name, complete_var)
+    click.echo(completion.source())
+
+
 @endpoint.command("list")
 @click.option(
     "--platform",
