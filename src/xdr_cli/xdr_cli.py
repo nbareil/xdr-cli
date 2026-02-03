@@ -426,6 +426,12 @@ def endpoint(ctx: click.Context):
     pass
 
 
+@cli.group()
+@click.pass_context
+def triage(ctx: click.Context):
+    pass
+
+
 @endpoint.command("list")
 @click.option(
     "--platform",
@@ -481,6 +487,75 @@ def do_endpoint_get(ctx: click.Context, hostname: str):
         click.echo("No match")
         sys.exit(404)
     return obj["reply"]["endpoints"]
+
+
+def do_get_triage_presets(ctx: click.Context):
+    params = dict(request_data={})
+    res = do_requests_post(ctx, "get_triage_presets", params)
+    obj = res.json()
+    return obj.get("reply", {}).get("triage_presets", [])
+
+
+def do_initiate_triage(ctx: click.Context, agent_ids: list[str], collector_uuid: str):
+    request_data = {"agent_ids": agent_ids}
+    if collector_uuid:
+        request_data["collector_uuid"] = collector_uuid
+    params = dict(request_data=request_data)
+    res = do_requests_post(ctx, "triage_endpoint", params)
+    obj = res.json()
+    return obj.get("reply", {})
+
+
+def do_action_status(ctx: click.Context, group_action_id: int):
+    params = dict(request_data=dict(group_action_id=group_action_id))
+    res = do_requests_post(ctx, "actions/get_action_status", params)
+    obj = res.json()
+    return obj.get("reply", {}).get("data", {})
+
+
+@triage.command("presets")
+@click.pass_context
+def triage_presets(ctx: click.Context):
+    presets = do_get_triage_presets(ctx)
+    for preset in presets:
+        click.echo(json.dumps(preset))
+
+
+@triage.command("new")
+@click.argument("hostname")
+@click.option(
+    "--collector-uuid",
+    "-c",
+    help="Triage configuration UUID (optional)",
+    type=str,
+    default="",
+)
+@click.pass_context
+def triage_new(ctx: click.Context, hostname: str, collector_uuid: str):
+    endpoints = do_endpoint_get(ctx, hostname)
+    agent_ids = [endpoint.get("endpoint_id") for endpoint in endpoints]
+    agent_ids = [agent_id for agent_id in agent_ids if agent_id]
+    if not agent_ids:
+        click.echo("No matching agent IDs found for hostname")
+        sys.exit(4)
+    reply = do_initiate_triage(ctx, agent_ids, collector_uuid)
+    click.echo(json.dumps(reply))
+
+
+@triage.command("status")
+@click.argument("group_action_id", type=int, nargs=-1)
+@click.pass_context
+def triage_status(ctx: click.Context, group_action_id: tuple[int]):
+    if not group_action_id:
+        click.echo("Provide one or more action IDs")
+        sys.exit(2)
+    for action_id in group_action_id:
+        statuses = do_action_status(ctx, action_id)
+        payload = {
+            "group_action_id": action_id,
+            "statuses": statuses,
+        }
+        click.echo(json.dumps(payload))
 
 
 @endpoint.command("who-has")
