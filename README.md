@@ -136,6 +136,33 @@ $ xdr-cli -p demo endpoint get bookwormvm | jq  '.ip, .domain, .operating_system
 "Debian 10.13"
 ```
 
+## Triage
+
+List available triage presets:
+
+```
+$ xdr-cli -p demo triage presets
+```
+
+Start a triage on a host:
+
+```
+$ xdr-cli -p demo triage new HOSTNAME
+```
+
+Optionally specify a triage configuration UUID:
+
+```
+$ xdr-cli -p demo triage new HOSTNAME --collector-uuid <UUID>
+```
+
+Check status for one or more triage action IDs:
+
+```
+$ xdr-cli -p demo triage status 123456789
+$ xdr-cli -p demo triage status 123456789 987654321
+```
+
 
 ## Get information about an IP address
 
