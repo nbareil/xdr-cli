@@ -31,7 +31,11 @@ API Key Hash: xxx
 API Key ID: 123
 ```
 
-It is recommended to configure it with an expiration time.
+The Key ID can be found here:
+
+![Screenshot of Cortex XDR's UI](_doc/api_key_id.webp)
+
+It is recommended to configure it with an expiration time (2 months from now is generally enough). In terms of privilege, you should use the "*Privileged Responder*" role.
 
 Now, you are good to go:
 
@@ -156,11 +160,10 @@ Optionally specify a triage configuration UUID:
 $ xdr-cli -p demo triage new HOSTNAME --collector-uuid <UUID>
 ```
 
-Check status for one or more triage action IDs:
+Check status for a triage action ID:
 
 ```
 $ xdr-cli -p demo triage status 123456789
-$ xdr-cli -p demo triage status 123456789 987654321
 ```
 
 
