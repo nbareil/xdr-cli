@@ -12,7 +12,8 @@ All platforms are supported: Linux, Mac, and Windows.
 ```
 $ git clone https://github.com/nbareil/xdr-cli.git
 $ cd xdr-cli
-$ pip install .
+$ sudo apt install python3-venv
+$ python3 -m venv venv && source venv/bin/activate && pip install .
 $ xdr-cli --help
 ```
 
