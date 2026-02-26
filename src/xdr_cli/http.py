@@ -26,9 +26,16 @@ class XdrTransport:
     def tenant(self) -> XdrTenant:
         return self._tenant
 
+    def _normalized_api_host(self) -> str:
+        base = self._tenant.tenant_base_url.strip()
+        base = base.replace("https://", "").replace("http://", "").strip("/")
+        base = base.split("/", 1)[0]
+        if not base.startswith("api-"):
+            base = "api-%s" % base
+        return base
+
     def build_api_url(self, uri: str) -> str:
-        base = self._tenant.tenant_base_url.replace("https://", "").replace("http://", "")
-        return "https://api-%s/public_api/v1/%s" % (base, uri.lstrip("/"))
+        return "https://%s/public_api/v1/%s" % (self._normalized_api_host(), uri.lstrip("/"))
 
     def build_auth_headers(self) -> Dict[str, str]:
         return generate_auth_headers(

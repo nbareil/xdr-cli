@@ -84,7 +84,14 @@ def build_py_script_from_yara_bytes(yara_content: bytes) -> str:
 
 
 class ScriptsService(BaseService):
-    async def run_snippet(self, script_content: str, endpoint_ids: List[str], timeout: int = 600, name: Optional[str] = None) -> Dict:
+    async def run_snippet(
+        self,
+        script_content: str,
+        endpoint_ids: List[str],
+        timeout: int = 600,
+        name: Optional[str] = None,
+        incident_id: Optional[str] = None,
+    ) -> Dict:
         if not endpoint_ids:
             raise XdrValidationError("endpoint_ids must not be empty")
         params = {
@@ -96,6 +103,8 @@ class ScriptsService(BaseService):
                 ],
             }
         }
+        if incident_id:
+            params["request_data"]["incident_id"] = str(incident_id)
         obj = await self.transport.post_json("scripts/run_snippet_code_script", params)
         return obj.get("reply", {})
 

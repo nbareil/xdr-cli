@@ -130,7 +130,11 @@ def do_requests_post(
     req_headers.update(
         **generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
     )
-    url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
+    base = str(ctx.obj.get("base_url") or "").strip().replace("https://", "").replace("http://", "").strip("/")
+    base = base.split("/", 1)[0]
+    if not base.startswith("api-"):
+        base = f"api-{base}"
+    url = f"https://{base}/public_api/v1/{uri}"
     res = requests.post(url, headers=req_headers, json=parameters)
     if res.status_code != 200:
         raise XDRException(
@@ -267,6 +271,7 @@ def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
 @script.command()
 @click.pass_context
 @click.option("--name", "-n", help="Script name", type=str)
+@click.option("--incident-id", help="Associate the script execution with an incident ID", type=str)
 @click.option(
     "--endpoint_id",
     "-e",
@@ -282,7 +287,7 @@ def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
     type=int,
 )
 @click.argument("script", type=click.File())
-def run(ctx, name: str, script: io.FileIO, endpoint_id: List[str], timeout: int):
+def run(ctx, name: str, incident_id: str, script: io.FileIO, endpoint_id: List[str], timeout: int):
     reply = _run_with_xdr_client(
         ctx,
         lambda client: client.scripts.run_snippet(
@@ -290,6 +295,7 @@ def run(ctx, name: str, script: io.FileIO, endpoint_id: List[str], timeout: int)
             endpoint_ids=list(endpoint_id),
             timeout=timeout,
             name=name,
+            incident_id=incident_id,
         ),
     )
     click.echo(json.dumps(reply))
