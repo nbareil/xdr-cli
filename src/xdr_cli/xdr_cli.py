@@ -1,16 +1,21 @@
 import base64
+import asyncio
 import io
 import tempfile
 import subprocess
 import os
+import pathlib
 import hashlib
 import gzip
 import json
 import logging
+import re
+import shutil
 import time
 import sys
 import string
 import secrets
+import zipfile
 from typing import Optional, Tuple
 
 import requests
@@ -19,12 +24,43 @@ import click
 from typing import List
 from datetime import datetime, timezone
 
+from .client import XdrClient
+from .errors import XdrError, XdrNotFoundError, XdrValidationError
+from .models import XdrCredentials, XdrTenant
+from .output.excel import write_xql_results_excel
+
 # API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
 
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".xdr-cli-auth.json")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.ERROR)
+
+
+def _tenant_from_ctx(ctx: click.Context) -> XdrTenant:
+    base_url = (ctx.obj or {}).get("base_url", "")
+    api_key_id = (ctx.obj or {}).get("api_key_id", "")
+    api_key_hash = (ctx.obj or {}).get("api_key_hash", "")
+    if not (base_url and api_key_id and api_key_hash):
+        raise click.ClickException("Missing authentication bits")
+    return XdrTenant(
+        tenant_base_url=base_url,
+        credentials=XdrCredentials(
+            api_key_id=str(api_key_id),
+            api_key_hash=str(api_key_hash),
+        ),
+    )
+
+
+def _run_with_xdr_client(ctx: click.Context, op):
+    async def _runner():
+        async with XdrClient(_tenant_from_ctx(ctx)) as client:
+            return await op(client)
+
+    try:
+        return asyncio.run(_runner())
+    except XdrError as exc:
+        raise click.ClickException(str(exc))
 
 
 @click.group()
@@ -87,13 +123,15 @@ class XDRException(Exception):
 
 
 def do_requests_post(
-    ctx: click.Context, uri: str, parameters: dict = {}, headers: dict = {}
+    ctx: click.Context, uri: str, parameters: dict = None, headers: dict = None
 ) -> requests.Response:
-    headers.update(
+    parameters = parameters or {}
+    req_headers = dict(headers or {})
+    req_headers.update(
         **generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
     )
     url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
-    res = requests.post(url, headers=headers, json=parameters)
+    res = requests.post(url, headers=req_headers, json=parameters)
     if res.status_code != 200:
         raise XDRException(
             f"{uri} failed with {res.status_code}: {res.reason} {res.text}"
@@ -205,6 +243,8 @@ def build_py_script_from_yara(yara):
 
 
 def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
+    if hasattr(script, "seek"):
+        script.seek(0)
     script_content = script.read()
     params = dict(
         request_data={
@@ -243,7 +283,16 @@ def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
 )
 @click.argument("script", type=click.File())
 def run(ctx, name: str, script: io.FileIO, endpoint_id: List[str], timeout: int):
-    return do_script_run(ctx, name, script, endpoint_id, timeout)
+    reply = _run_with_xdr_client(
+        ctx,
+        lambda client: client.scripts.run_snippet(
+            script_content=script.read(),
+            endpoint_ids=list(endpoint_id),
+            timeout=timeout,
+            name=name,
+        ),
+    )
+    click.echo(json.dumps(reply))
 
 
 @script.command
@@ -283,44 +332,32 @@ def yara_memory_scan(
     if all and not platform:
         logger.error("Option --all requires to select --platform")
         sys.exit(3)
-    py_script = io.StringIO(build_py_script_from_yara(yara_ruleset))
-    if all:
-        endpoint = []
-        for p in platform:
-            endpoint += (x["endpoint_id"] for x in do_endpoint_list(ctx, p))
-
-    all_action_id = []
-    endpoint_id_list = []
-    for i, endpoint_id in enumerate(endpoint):
-        endpoint_id_list.append(endpoint_id)
-        if i and (i % 1000 == 0):
-            ret = do_script_run(ctx, "yara_memory_scan", py_script, endpoint_id_list, 600)
-            all_action_id.append(ret.get("action_id"))
-            endpoint_id_list = []
-    if endpoint_id_list:
-        ret = do_script_run(ctx, "yara_memory_scan", py_script, endpoint_id_list, 600)
-        all_action_id.append(ret.get("action_id"))
-    click.echo(json.dumps(dict(actions_id=all_action_id)))
+    result = _run_with_xdr_client(
+        ctx,
+        lambda client: client.scripts.yara_memory_scan(
+            yara_ruleset_bytes=yara_ruleset.read(),
+            endpoint_ids=list(endpoint) if not all else None,
+            all_platforms=list(platform) if all else None,
+            timeout=600,
+        ),
+    )
+    click.echo(json.dumps(result))
 
 
 @script.command
 @click.pass_context
 @click.argument("action_id", type=int)
 def results(ctx, action_id):
-    params = dict(request_data={"action_id": action_id})
-    res = do_requests_post(ctx, "scripts/get_script_execution_results", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
+    obj = _run_with_xdr_client(ctx, lambda client: client.scripts.execution_results(action_id))
+    click.echo(json.dumps(obj))
 
 
 @script.command
 @click.pass_context
 @click.argument("action_id", type=int)
 def status(ctx, action_id):
-    params = dict(request_data={"action_id": action_id})
-    res = do_requests_post(ctx, "scripts/get_script_execution_status", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
+    obj = _run_with_xdr_client(ctx, lambda client: client.scripts.execution_status(action_id))
+    click.echo(json.dumps(obj))
 
 
 @script.command
@@ -328,10 +365,11 @@ def status(ctx, action_id):
 @click.argument("action_id", type=int)
 @click.argument("endpoint_id", type=str)
 def result_files(ctx, endpoint_id: str, action_id: str):
-    params = dict(request_data={"action_id": action_id, "endpoint_id": endpoint_id})
-    res = do_requests_post(ctx, "scripts/get_script_execution_results_files", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
+    obj = _run_with_xdr_client(
+        ctx,
+        lambda client: client.scripts.result_files(action_id=int(action_id), endpoint_id=endpoint_id),
+    )
+    click.echo(json.dumps(obj))
 
 
 @script.command
@@ -363,7 +401,8 @@ def do_list_incidents(ctx: click.Context):
 @incident.command("list")
 @click.pass_context
 def list_incidents(ctx: click.Context):
-    for incident in do_list_incidents(ctx):
+    incidents = _run_with_xdr_client(ctx, lambda client: client.incidents.list())
+    for incident in incidents:
         click.echo(json.dumps(incident))
 
 
@@ -371,21 +410,16 @@ def list_incidents(ctx: click.Context):
 @click.argument("incident_id")
 @click.pass_context
 def get_incident(ctx: click.Context, incident_id: str) -> None:
-    params = dict(request_data=dict(incident_id=incident_id))
-    res = do_requests_post(ctx, "incidents/get_incident_extra_data", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
+    obj = _run_with_xdr_client(ctx, lambda client: client.incidents.get(incident_id))
+    click.echo(json.dumps(obj))
 
 
 @incident.command("close")
 @click.argument("incident_id")
 @click.pass_context
 def close_incident(ctx: click.Context, incident_id: str):
-    params = dict(
-        request_data=dict(incident_id_=incident_id), update_data=dict(status="resolved")
-    )
-    res = do_requests_post(ctx, "incidents/update_incidents", params)
-    click.echo(res)
+    obj = _run_with_xdr_client(ctx, lambda client: client.incidents.close(incident_id))
+    click.echo(json.dumps(obj))
 
 
 @cli.group()
@@ -404,7 +438,8 @@ def do_alert_list(ctx: click.Context):
 @alert.command("list")
 @click.pass_context
 def list_alerts(ctx: click.Context):
-    for alert in do_alert_list(ctx):
+    alerts = _run_with_xdr_client(ctx, lambda client: client.alerts.list())
+    for alert in alerts:
         click.echo(json.dumps(alert))
 
 
@@ -412,12 +447,8 @@ def list_alerts(ctx: click.Context):
 @click.argument("alert_id", type=int, nargs=-1)
 @click.pass_context
 def close_alert(ctx: click.Context, alert_id: List[int]):
-    params = dict(
-        request_data=dict(
-            alert_id_list=alert_id, update_data=dict(status="resolved_other")
-        )
-    )
-    res = do_requests_post(ctx, "alerts/update_alerts", params)
+    obj = _run_with_xdr_client(ctx, lambda client: client.alerts.close(list(alert_id)))
+    click.echo(json.dumps(obj))
 
 
 @cli.group()
@@ -459,7 +490,7 @@ def completion(ctx: click.Context, shell: Optional[str]):
 @click.pass_context
 def endpoint_list(ctx: click.Context, platform: str = ""):
     """Get more information about an endpoint"""
-    endpoints = do_endpoint_list(ctx, platform)
+    endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.list(platform=platform or None))
     for endpoint in endpoints:
         click.echo(json.dumps(endpoint, indent=4))
 
@@ -481,7 +512,13 @@ def do_endpoint_list(ctx: click.Context, platform: str):
 @click.pass_context
 def endpoint_get(ctx: click.Context, hostname: str, field: str = None):
     """Get more information about an endpoint"""
-    endpoints = do_endpoint_get(ctx, hostname)
+    try:
+        endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.get_by_hostname(hostname))
+    except click.ClickException as exc:
+        if "No endpoint matched hostname" in str(exc):
+            click.echo("No match")
+            sys.exit(404)
+        raise
     for endpoint in endpoints:
         if field:
             click.echo(endpoint.get(field, "N/A"))
@@ -533,7 +570,7 @@ def do_action_status(ctx: click.Context, group_action_id: int):
 @triage.command("presets")
 @click.pass_context
 def triage_presets(ctx: click.Context):
-    presets = do_get_triage_presets(ctx)
+    presets = _run_with_xdr_client(ctx, lambda client: client.triage.presets())
     for preset in presets:
         click.echo(json.dumps(preset))
 
@@ -549,13 +586,19 @@ def triage_presets(ctx: click.Context):
 )
 @click.pass_context
 def triage_new(ctx: click.Context, hostname: str, collector_uuid: str):
-    endpoints = do_endpoint_get(ctx, hostname)
-    agent_ids = [endpoint.get("endpoint_id") for endpoint in endpoints]
-    agent_ids = [agent_id for agent_id in agent_ids if agent_id]
-    if not agent_ids:
-        click.echo("No matching agent IDs found for hostname")
-        sys.exit(4)
-    reply = do_initiate_triage(ctx, agent_ids, collector_uuid)
+    try:
+        reply = _run_with_xdr_client(
+            ctx,
+            lambda client: client.triage.start_by_hostname(hostname, collector_uuid=collector_uuid or None),
+        )
+    except click.ClickException as exc:
+        if "No matching agent IDs found" in str(exc):
+            click.echo("No matching agent IDs found for hostname")
+            sys.exit(4)
+        if "No endpoint matched hostname" in str(exc):
+            click.echo("No match")
+            sys.exit(404)
+        raise
     click.echo(json.dumps(reply))
 
 
@@ -566,12 +609,8 @@ def triage_status(ctx: click.Context, group_action_id: Tuple[int, ...]):
     if not group_action_id:
         click.echo("Provide one or more action IDs")
         sys.exit(2)
-    for action_id in group_action_id:
-        statuses = do_action_status(ctx, action_id)
-        payload = {
-            "group_action_id": action_id,
-            "statuses": statuses,
-        }
+    payloads = _run_with_xdr_client(ctx, lambda client: client.triage.statuses(list(group_action_id)))
+    for payload in payloads:
         click.echo(json.dumps(payload))
 
 
@@ -581,20 +620,17 @@ def triage_status(ctx: click.Context, group_action_id: Tuple[int, ...]):
 @click.pass_context
 def endpoint_who_has(ctx: click.Context, ip: str, raw: bool = False):
     """Resolve an IP address to a hostname"""
-    # click.echo(hostname)
-    parameters = {
-        "request_data": {
-            "filters": [
-                {"field": "ip_list", "operator": "in", "value": [ip]},
-            ],
-        }
-    }
-    res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
-    obj = res.json()
-    if obj.get("reply", {}).get("total_count", 0) == 0:
+    try:
+        endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.who_has(ip))
+    except click.ClickException as exc:
+        if "No endpoint matched IP" in str(exc):
+            click.echo("No match")
+            sys.exit(404)
+        raise
+    if not endpoints:
         click.echo("No match")
         sys.exit(404)
-    for endpoint in obj["reply"]["endpoints"]:
+    for endpoint in endpoints:
         if raw:
             click.echo(json.dumps(endpoint, indent=4))
         else:
@@ -640,8 +676,8 @@ def add(name: str):
     json.dump(tenants, open(AUTH_FILE, "w"))
 
 
-@tenant.command
-def list():
+@tenant.command("list")
+def list_tenants():
     try:
         tenants = json.load(open(AUTH_FILE))
         for name in tenants:
@@ -658,54 +694,124 @@ def remove(name: str):
     json.dump(tenants, open(AUTH_FILE, "w"))
 
 
+def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes):
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            name = member.filename
+            if not name or name.endswith("/"):
+                continue
+            destination = (output_dir / name).resolve()
+            if os.path.commonpath([str(output_dir.resolve()), str(destination)]) != str(
+                output_dir.resolve()
+            ):
+                raise click.ClickException(f"Unsafe zip entry path: {name}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member, pwd=password) as src, open(destination, "wb") as dst:
+                dst.write(src.read())
+
+
+def _flatten_endpoint_path(path: str) -> str:
+    normalized = path.replace("\\", "_").replace("/", "_").replace(":", "")
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9._-]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("._")
+    return normalized or "file"
+
+
+def _rename_payload_files_from_manifest(output_dir: pathlib.Path) -> None:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception as exc:
+        raise click.ClickException(f"Failed to parse manifest.json: {exc}")
+
+    used_names = {p.name for p in output_dir.iterdir() if p.is_file()}
+    for entry in manifest.get("entries", []):
+        for file_info in entry.get("files", []):
+            archived_path = str(file_info.get("archivedPath", "")).replace("\\", "/")
+            original_path = str(file_info.get("path") or file_info.get("requestedPath") or "")
+            if not archived_path or not original_path:
+                continue
+            src = (output_dir / archived_path).resolve()
+            if not src.exists() or not src.is_file():
+                continue
+            base_name = _flatten_endpoint_path(original_path)
+            target = output_dir / base_name
+            if target.name in used_names and target != src:
+                stem = target.stem
+                suffix = target.suffix
+                i = 1
+                while True:
+                    candidate = output_dir / f"{stem}_{i}{suffix}"
+                    if candidate.name not in used_names:
+                        target = candidate
+                        break
+                    i += 1
+            if target != src:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(target))
+            used_names.add(target.name)
+
+    for directory in sorted(output_dir.glob("entry_*"), reverse=True):
+        if directory.is_dir():
+            for subdir in sorted(directory.rglob("*"), reverse=True):
+                if subdir.is_dir():
+                    try:
+                        subdir.rmdir()
+                    except OSError:
+                        pass
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+
+def _extract_retrieved_file_zip(content: bytes, output_dir: pathlib.Path) -> None:
+    password = b"suspicious"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outer_zip_path = output_dir / "retrieved_file.zip"
+    outer_zip_path.write_bytes(content)
+    _safe_extract_zip(outer_zip_path, output_dir, password)
+
+    inner_zip_path = output_dir / "script_output.zip"
+    if inner_zip_path.exists():
+        _safe_extract_zip(inner_zip_path, output_dir, password)
+        _rename_payload_files_from_manifest(output_dir)
+        inner_zip_path.unlink()
+    outer_zip_path.unlink()
+
+
 @cli.command("get-file")
 @click.option("--endpoint-id", type=str, help="Endpoint ID")
 @click.option("--hostname", type=str, help="Endpoint hostname")
-@click.option("--output", "-o", type=click.File("wb"), required=True)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=pathlib.Path),
+    required=True,
+    help="Directory where endpoint files will be stored",
+)
 @click.argument("path", nargs=-1)
 @click.pass_context
-def get_file(ctx: click.Context, endpoint_id: str, path: List[str], output, hostname):
-    """Retrieve a file from an endpoint."""
-    if hostname:
-        endpoints = do_endpoint_get(ctx, hostname)
-        endpoint_id = endpoints[0]["endpoint_id"]
-    params = {
-        "request_data": {
-            "filters": [
-                {"field": "endpoint_id_list", "operator": "in", "value": [endpoint_id]}
-            ],
-            "files": {
-                "windows": path,
-                "macos": path,
-                "linux": path,
-            },
-        }
-    }
-    res = do_requests_post(ctx, "endpoints/file_retrieval", params)
-    ret = res.json()
-    action_id = ret.get("reply", {}).get("action_id")
-    if not action_id:
-        click.echo("There was an error retrieving the file")
-        sys.exit(1)
-
-    final_states = [
-        "CANCELLED",
-        "ABORTED",
-        "EXPIRED",
-        "COMPLETED_PARTIAL",
-        "COMPLETED_SUCCESSFULLY",
-        "FAILED",
-        "TIMEOUT",
-    ]
-    while True:
-        status = get_action_status(ctx, action_id, endpoint_id)
-        if status in final_states:
-            break
-        time.sleep(5)
-    if not status.startswith("COMPLETED"):
-        click.echo(f"File retrieval ended in state {status}")
-        sys.exit(2)
-    retrieve_file(ctx, output, action_id, endpoint_id)
+def get_file(
+    ctx: click.Context,
+    endpoint_id: str,
+    path: List[str],
+    output: pathlib.Path,
+    hostname,
+):
+    """Retrieve a file from an endpoint and extract the returned archives."""
+    content = _run_with_xdr_client(
+        ctx,
+        lambda client: client.files.retrieve(
+            endpoint_id=endpoint_id,
+            hostname=hostname,
+            paths=list(path),
+        ),
+    )
+    _extract_retrieved_file_zip(content, output)
 
 
 def get_action_status(ctx: click.Context, action_id, endpoint_id) -> str:
@@ -768,80 +874,19 @@ def xql(
 
     if not xql_query:
         xql_query = open_editor()
-
-    params = {
-        "request_data": {
-            "query": xql_query,
-        }
-    }
-
-    if begin_time and end_time:
-        params["request_data"]["timeframe"] = {
-            "from": begin_time,
-            "to": end_time,
-        }
-    res = do_requests_post(ctx, "xql/start_xql_query", params)
-    res = res.json()
-    query_id = res.get("reply")
-    logger.debug(query_id)
-    params = {
-        "request_data": {
-            "query_id": query_id,
-            "format": "json",
-            "pending_flag": False,  # Be synchronous (i.e. blocking)
-        }
-    }
-    res = do_requests_post(ctx, "xql/get_query_results", params)
-    resp = res.json()["reply"]
-    if resp.get("status") != "SUCCESS":
-        logger.error("xql/get_query_results failed: " + res.text)
-        sys.exit(1)
-    if resp.get("number_of_results", 0) <= 1000:
-        results = [
-            json.dumps(entry) for entry in resp.get("results", {}).get("data", [])
-        ]
-    else:
-        logger.debug("Need to switch to the stream version")
-        params = {
-            "request_data": {
-                "stream_id": resp.get("results").get("stream_id"),
-                "is_gzip_compressed": False,
-            }
-        }
-        logger.debug(params)
-
-        headers = generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
-        # headers["Accept-Encoding"] = "gzip"
-        uri = "xql/get_query_results_stream"
-        url = f"https://api-{ctx.obj.get('base_url')}/public_api/v1/{uri}"
-        with requests.post(url, json=params, headers=headers, stream=True) as r:
-            if not res.ok:
-                logger.error("xql/get_query_results_stream failed: " + res.text)
-                sys.exit(2)
-            results = [chunk.decode("utf-8") for chunk in r.iter_lines()]
-
+    results = _run_with_xdr_client(
+        ctx,
+        lambda client: client.xql.run(
+            query=xql_query,
+            begin_time=begin_time,
+            end_time=end_time,
+        ),
+    )
     if excel:
-        import xlsxwriter
-
-        workbook = xlsxwriter.Workbook(output)
-        worksheet = workbook.add_worksheet()
-        results = map(json.loads, results)
-        first = next(results)
-        logger.debug(first)
-        columns = first.keys()
-        logger.debug(columns)
-        for i, col in enumerate(columns):
-            worksheet.write(0, i, col)
-            worksheet.write(1, i, first.get(col, ""))
-        row = 0
-        for r in results:
-            row += 1
-            for i, col in enumerate(columns):
-                worksheet.write(row, i, r.get(col, ""))
-        workbook.close()
-    else:
-        for r in results:
-            click.echo(r)
+        write_xql_results_excel(results, output)
+        return
+    for r in results:
+        click.echo(json.dumps(r))
 
 
 if __name__ == "__main__":
