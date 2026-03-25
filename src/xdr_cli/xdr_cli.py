@@ -16,7 +16,7 @@ import sys
 import string
 import secrets
 import zipfile
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import requests
 import click
@@ -35,6 +35,14 @@ AUTH_FILE = os.path.join(os.path.expanduser("~"), ".xdr-cli-auth.json")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.ERROR)
+
+
+def _set_log_level(level: int) -> None:
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(level=level)
+        return
+    root.setLevel(level)
 
 
 def _tenant_from_ctx(ctx: click.Context) -> XdrTenant:
@@ -78,9 +86,9 @@ def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
     ctx.obj["verbose"] = verbose
     ctx.obj["debug"] = debug
     if verbose:
-        logging.basicConfig(level=logging.INFO)
+        _set_log_level(logging.INFO)
     if debug:
-        logging.basicConfig(level=logging.DEBUG)
+        _set_log_level(logging.DEBUG)
     if profile:
         profiles = json.load(open(AUTH_FILE))
         if profile in profiles:
@@ -97,8 +105,36 @@ def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
         ctx.obj["base_url"] = base_url
         ctx.obj["api_key_id"] = api_key_id
         ctx.obj["api_key_hash"] = api_key_hash
-    if not (all([ctx.obj["base_url"], ctx.obj["api_key_id"], ctx.obj["api_key_hash"]])):
+    if (
+        not all([ctx.obj["base_url"], ctx.obj["api_key_id"], ctx.obj["api_key_hash"]])
+        and ctx.invoked_subcommand not in {"config", "slack"}
+    ):
         click.echo("Missing authentication bits")
+
+
+def _load_tenants_from_auth_file(auth_file: str) -> Dict[str, XdrTenant]:
+    try:
+        raw = json.load(open(auth_file))
+    except FileNotFoundError:
+        raise click.ClickException(f"Auth file not found: {auth_file}")
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Failed to parse auth file {auth_file}: {exc}")
+
+    tenants: Dict[str, XdrTenant] = {}
+    for alias, cfg in raw.items():
+        try:
+            tenants[alias] = XdrTenant(
+                tenant_base_url=str(cfg["base_url"]),
+                credentials=XdrCredentials(
+                    api_key_id=str(cfg["api_key_id"]),
+                    api_key_hash=str(cfg["api_key_hash"]),
+                ),
+            )
+        except KeyError as exc:
+            raise click.ClickException(
+                f"Tenant profile '{alias}' is missing required field: {exc}"
+            )
+    return tenants
 
 
 def generate_auth_headers(api_key_id, api_key) -> dict:
@@ -698,6 +734,97 @@ def remove(name: str):
     tenants = json.load(open(AUTH_FILE))
     del tenants[name]
     json.dump(tenants, open(AUTH_FILE, "w"))
+
+
+@cli.group()
+def slack():
+    """Slack bot integration"""
+    pass
+
+
+@slack.command("serve")
+@click.option(
+    "--auth-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
+    default=pathlib.Path(AUTH_FILE),
+    show_default=True,
+    help="Path to xdr-cli tenant auth file",
+)
+@click.option(
+    "--signing-secret",
+    envvar="SLACK_SIGNING_SECRET",
+    default="",
+    help="Slack app signing secret (or set SLACK_SIGNING_SECRET)",
+)
+@click.option(
+    "--bot-token",
+    envvar="SLACK_BOT_TOKEN",
+    default="",
+    help="Slack bot token xoxb-... (or set SLACK_BOT_TOKEN)",
+)
+@click.option(
+    "--app-token",
+    envvar="SLACK_APP_TOKEN",
+    default="",
+    help="Slack app-level token xapp-... for Socket Mode (or set SLACK_APP_TOKEN)",
+)
+@click.option(
+    "--default-tenant",
+    envvar="XDR_SLACK_DEFAULT_TENANT",
+    default="",
+    help="Default tenant alias to use when a user omits --tenant",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="XDR API timeout in seconds for Slack-triggered requests",
+)
+def slack_serve(
+    auth_file: pathlib.Path,
+    signing_secret: str,
+    bot_token: str,
+    app_token: str,
+    default_tenant: str,
+    timeout: float,
+):
+    """Run the Slack /xdr bot in Socket Mode."""
+    if not signing_secret:
+        raise click.ClickException("Missing Slack signing secret (--signing-secret or SLACK_SIGNING_SECRET)")
+    if not bot_token:
+        raise click.ClickException("Missing Slack bot token (--bot-token or SLACK_BOT_TOKEN)")
+    if not app_token:
+        raise click.ClickException("Missing Slack app token (--app-token or SLACK_APP_TOKEN)")
+
+    from .models import XdrClientOptions
+    from .slack import create_slack_app
+    from .slack.tenant_store import InMemoryTenantStore
+
+    try:
+        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise click.ClickException(
+            "slack-bolt Socket Mode support is unavailable. Install xdr-cli[slack]."
+        ) from exc
+
+    tenants = _load_tenants_from_auth_file(str(auth_file))
+    if not tenants:
+        raise click.ClickException(f"No tenant profiles found in {auth_file}")
+    user_defaults = {"*": default_tenant} if default_tenant else {}
+    tenant_store = InMemoryTenantStore(tenants=tenants, user_defaults=user_defaults)
+    app = create_slack_app(
+        signing_secret=signing_secret,
+        bot_token=bot_token,
+        tenant_store=tenant_store,
+        client_options=XdrClientOptions(timeout_seconds=timeout),
+    )
+    async def _serve():
+        handler = AsyncSocketModeHandler(app, app_token)
+        logger.info("Starting Slack Socket Mode bot with %d tenant profile(s)", len(tenants))
+        await handler.start_async()
+
+    asyncio.run(_serve())
 
 
 def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes):

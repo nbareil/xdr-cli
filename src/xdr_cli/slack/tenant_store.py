@@ -28,4 +28,4 @@ class InMemoryTenantStore:
         return sorted(self._tenants.keys())
 
     async def get_default_tenant_for_user(self, user_id: str) -> Optional[str]:
-        return self._user_defaults.get(user_id)
+        return self._user_defaults.get(user_id) or self._user_defaults.get("*")

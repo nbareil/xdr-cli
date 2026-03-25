@@ -13,7 +13,8 @@ dependencies = [
 
 [project.optional-dependencies]
 slack = [
- "slack-bolt"
+ "slack-bolt",
+ "aiohttp"
 ]
 
 [project.scripts]
