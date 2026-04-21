@@ -244,12 +244,19 @@ $ xdr-cli --profile=demo xlq
 
 ## Script execution
 
-You can run execute Python scripts directly on a list of endpoint IDs:
+You can run execute Python scripts directly on a list of endpoint hostnames:
 
 ```
 $ echo 'print "Hello world"' >  hello.py
-$ xdr-cli -p demo script run -e 3ab2dfe3ded3416fad12f1c638eddf8b -e 677161eee18749df90adf0783bda9a21  hello.py
+$ xdr-cli -p demo script run --hostname DESKTOP-V24D23 --hostname DESKTOP-4UB2  hello.py
 {"action_id": 522, "status": 1, "endpoints_count": 2}
+```
+
+You can also specify endpoint IDs directly, or mix endpoint IDs and hostnames. Endpoint IDs avoid a hostname lookup round trip:
+
+```
+$ xdr-cli -p demo script run -e 3ab2dfe3ded3416fad12f1c638eddf8b -e 677161eee18749df90adf0783bda9a21  hello.py
+{"action_id": 523, "status": 1, "endpoints_count": 2}
 ```
 
 Then you can get its execution status using the provided Action ID:

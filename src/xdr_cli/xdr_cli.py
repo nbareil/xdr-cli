@@ -316,6 +316,12 @@ def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
     multiple=True,
 )
 @click.option(
+    "--hostname",
+    help="Endpoint hostname where to execute the script",
+    type=str,
+    multiple=True,
+)
+@click.option(
     "--timeout",
     "-t",
     help="Execution timeout for the script (in seconds)",
@@ -323,12 +329,21 @@ def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
     type=int,
 )
 @click.argument("script", type=click.File())
-def run(ctx, name: str, incident_id: str, script: io.FileIO, endpoint_id: List[str], timeout: int):
+def run(
+    ctx,
+    name: str,
+    incident_id: str,
+    script: io.FileIO,
+    endpoint_id: List[str],
+    hostname: List[str],
+    timeout: int,
+):
     reply = _run_with_xdr_client(
         ctx,
         lambda client: client.scripts.run_snippet(
             script_content=script.read(),
             endpoint_ids=list(endpoint_id),
+            hostnames=list(hostname),
             timeout=timeout,
             name=name,
             incident_id=incident_id,

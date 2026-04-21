@@ -87,19 +87,33 @@ class ScriptsService(BaseService):
     async def run_snippet(
         self,
         script_content: str,
-        endpoint_ids: List[str],
+        endpoint_ids: Optional[List[str]] = None,
+        hostnames: Optional[List[str]] = None,
         timeout: int = 600,
         name: Optional[str] = None,
         incident_id: Optional[str] = None,
     ) -> Dict:
-        if not endpoint_ids:
-            raise XdrValidationError("endpoint_ids must not be empty")
+        target_ids = []
+        seen = set()
+        for endpoint_id in endpoint_ids or []:
+            if endpoint_id and endpoint_id not in seen:
+                target_ids.append(endpoint_id)
+                seen.add(endpoint_id)
+        for hostname in hostnames or []:
+            endpoints = await self.client.endpoints.get_by_hostname(hostname)
+            for endpoint in endpoints:
+                endpoint_id = endpoint.get("endpoint_id")
+                if endpoint_id and endpoint_id not in seen:
+                    target_ids.append(endpoint_id)
+                    seen.add(endpoint_id)
+        if not target_ids:
+            raise XdrValidationError("endpoint_ids or hostnames must not be empty")
         params = {
             "request_data": {
                 "timeout": timeout,
                 "snippet_code": script_content,
                 "filters": [
-                    {"field": "endpoint_id_list", "operator": "in", "value": list(endpoint_ids)}
+                    {"field": "endpoint_id_list", "operator": "in", "value": target_ids}
                 ],
             }
         }
