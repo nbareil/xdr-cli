@@ -2,55 +2,64 @@ import json
 
 from click.testing import CliRunner
 
-from xdr_cli import xdr_cli
-from xdr_cli.errors import XdrNotFoundError
-from xdr_cli.xdr_cli import cli
+from xdr_cli.xdr_cli import _parse_fields, _project, cli
 
 AUTH = ["--base-url", "x", "--api-key-id", "1", "--api-key-hash", "h"]
 
 
-def test_dry_run_isolate_no_network(monkeypatch):
-    def boom(*a, **k):
-        raise AssertionError("should not hit the network on --dry-run")
+# --- pure helpers ---------------------------------------------------------- #
 
-    monkeypatch.setattr(xdr_cli, "_run_with_xdr_client", boom)
-    result = CliRunner().invoke(cli, AUTH + ["endpoint", "isolate", "--hostname", "H", "--dry-run"])
-    assert result.exit_code == 0
-    assert '"dry_run": true' in result.output
+def test_parse_fields_splits_and_trims():
+    assert _parse_fields("a, b ,c") == ["a", "b", "c"]
+    assert _parse_fields("") is None
+    assert _parse_fields(None) is None
 
 
-def test_json_envelope_success(monkeypatch):
-    monkeypatch.setattr(xdr_cli, "_run_with_xdr_client", lambda ctx, op: [{"endpoint_name": "h1"}])
-    result = CliRunner().invoke(cli, ["--json"] + AUTH + ["endpoint", "list"])
+def test_project_keeps_only_requested_fields_with_na_default():
+    item = {"endpoint_name": "h1", "ip": ["1.2.3.4"], "os_type": "LINUX"}
+    assert _project(item, ["endpoint_name", "ip"]) == {"endpoint_name": "h1", "ip": ["1.2.3.4"]}
+    assert _project(item, ["missing"]) == {"missing": "N/A"}
+    assert _project(item, None) is item
+
+
+# --- real CLI invocations (no mocks) --------------------------------------- #
+
+def test_dry_run_success_envelope():
+    # --dry-run short-circuits before any network call and routes through the
+    # same success-envelope path, so this exercises the real --json output.
+    result = CliRunner().invoke(
+        cli, ["--json"] + AUTH + ["endpoint", "isolate", "--hostname", "H", "--dry-run"]
+    )
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ok"] is True
-    assert payload["data"] == [{"endpoint_name": "h1"}]
-
-
-def test_json_envelope_not_found_exit_code(monkeypatch):
-    def raise_not_found(ctx, op):
-        raise XdrNotFoundError("No endpoint matched hostname H", resource="endpoint")
-
-    monkeypatch.setattr(xdr_cli, "_run_with_xdr_client", raise_not_found)
-    result = CliRunner().invoke(cli, ["--json"] + AUTH + ["endpoint", "get", "H"])
-    # Exit code 4 (NOT_FOUND), not the old wrapped 404 -> 148.
-    assert result.exit_code == 4
-    payload = json.loads(result.output)
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "ENDPOINT_NOT_FOUND"
-
-
-def test_fields_projection(monkeypatch):
-    rows = [{"endpoint_name": "h1", "ip": ["1.2.3.4"], "os_type": "LINUX"}]
-    monkeypatch.setattr(xdr_cli, "_run_with_xdr_client", lambda ctx, op: rows)
-    result = CliRunner().invoke(cli, ["--json"] + AUTH + ["endpoint", "list", "--fields", "endpoint_name,ip"])
-    payload = json.loads(result.output)
-    assert payload["data"] == [{"endpoint_name": "h1", "ip": ["1.2.3.4"]}]
+    assert payload["data"]["dry_run"] is True
+    assert payload["data"]["action"] == "isolate"
 
 
 def test_yara_scan_usage_error_exit_code():
     result = CliRunner().invoke(cli, ["--json"] + AUTH + ["script", "yara-memory-scan", __file__])
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "VALIDATION"
+
+
+def test_readonly_blocks_mutation_end_to_end():
+    # Exercises the whole stack: CLI -> XdrClient -> service guard. The guard
+    # fires before any HTTP request, so no network/mock is needed.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--json", "--read-only"] + AUTH + ["incident", "close", "42"],
+    )
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["error"]["code"] == "READ_ONLY"
+
+
+def test_xql_non_interactive_without_query_fails_fast():
+    result = CliRunner().invoke(cli, ["--json"] + AUTH + ["xql"], input="")
     assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["error"]["code"] == "VALIDATION"

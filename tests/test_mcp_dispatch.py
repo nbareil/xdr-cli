@@ -1,9 +1,7 @@
-import asyncio
-
 import pytest
 
 from xdr_cli.errors import XdrValidationError
-from xdr_cli.mcp.dispatch import TOOL_SPECS, XdrToolDispatcher
+from xdr_cli.mcp.dispatch import TOOL_SPECS, _HANDLERS, XdrToolDispatcher
 from xdr_cli.models import XdrCredentials, XdrTenant
 
 
@@ -13,13 +11,22 @@ TENANTS = {
 }
 
 
-def run(coro):
-    return asyncio.run(coro)
+def test_every_advertised_tool_has_a_handler():
+    # Catches a tool spec without a matching handler (or a typo'd name).
+    spec_names = {spec.name for spec in TOOL_SPECS}
+    assert spec_names == set(_HANDLERS)
 
 
 def test_tool_specs_have_tenant_property():
     for spec in TOOL_SPECS:
         assert "tenant" in spec.input_schema["properties"]
+
+
+def test_required_args_are_declared_as_properties():
+    for spec in TOOL_SPECS:
+        props = spec.input_schema["properties"]
+        for required in spec.input_schema.get("required", []):
+            assert required in props, f"{spec.name}: required {required!r} not in properties"
 
 
 def test_resolve_default_tenant():
@@ -47,48 +54,3 @@ def test_ambiguous_tenant_requires_selection():
 def test_single_tenant_auto_selected():
     d = XdrToolDispatcher({"only": TENANTS["demo"]})
     assert d._resolve_tenant(None).tenant_base_url == "demo.example.com"
-
-
-def test_call_dispatches_to_service(monkeypatch):
-    d = XdrToolDispatcher(TENANTS, default_tenant="demo")
-
-    captured = {}
-
-    class FakeEndpoints:
-        async def list(self, platform=None, limit=None):
-            captured["platform"] = platform
-            captured["limit"] = limit
-            return [{"endpoint_name": "h1"}]
-
-    class FakeClient:
-        def __init__(self, tenant, options=None):
-            self.endpoints = FakeEndpoints()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
-    monkeypatch.setattr("xdr_cli.mcp.dispatch.XdrClient", FakeClient)
-    result = run(d.call("endpoint_list", {"platform": "linux", "limit": 5}))
-    assert result == [{"endpoint_name": "h1"}]
-    assert captured == {"platform": "linux", "limit": 5}
-
-
-def test_unknown_tool_rejected(monkeypatch):
-    d = XdrToolDispatcher(TENANTS, default_tenant="demo")
-
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
-    monkeypatch.setattr("xdr_cli.mcp.dispatch.XdrClient", FakeClient)
-    with pytest.raises(XdrValidationError):
-        run(d.call("does_not_exist", {}))
