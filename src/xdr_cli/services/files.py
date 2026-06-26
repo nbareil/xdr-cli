@@ -4,18 +4,8 @@ import asyncio
 from typing import List, Optional
 
 from ..errors import XdrOperationTimeoutError, XdrValidationError
+from .actions import FINAL_ACTION_STATES as _FINAL_STATES
 from .base import BaseService
-
-
-_FINAL_STATES = {
-    "CANCELLED",
-    "ABORTED",
-    "EXPIRED",
-    "COMPLETED_PARTIAL",
-    "COMPLETED_SUCCESSFULLY",
-    "FAILED",
-    "TIMEOUT",
-}
 
 
 class FilesService(BaseService):

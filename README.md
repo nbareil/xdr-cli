@@ -38,11 +38,72 @@ The Key ID can be found here:
 
 It is recommended to configure it with an expiration time (2 months from now is generally enough). In terms of privilege, you should use the "*Privileged Responder*" role.
 
+The tenant credentials are stored in `~/.xdr-cli-auth.json`, which is written with `0600` permissions (owner read/write only).
+
+For non-interactive setups (CI, agents), pass everything as flags instead of answering prompts:
+
+```
+$ xdr-cli config tenant add demo \
+    --base-url your-tenant.xdr.us.paloaltonetworks.com \
+    --api-key-hash xxx --api-key-id 123 --yes
+```
+
 Now, you are good to go:
 
 ```
 $ xdr-cli --profile demo incident list
 ```
+
+# Using xdr-cli from scripts and AI agents
+
+`xdr-cli` is designed to be driven non-interactively. A few global options make it
+predictable for scripts and AI agents:
+
+- `--json` wraps every command's output in a stable envelope: `{"ok": true, "data": ...}`
+  on success, or `{"ok": false, "error": {"code": ..., "message": ...}}` on failure. The
+  process exit code is also stable: `0` success, `2` usage/validation error, `4` not found,
+  `1` other errors.
+- `--read-only` (or the `XDR_CLI_READONLY` environment variable) refuses every mutating
+  operation (close, isolate, scan, quarantine, script run, triage). Useful when you want an
+  agent to be able to look but not touch.
+- `--dry-run` (on every mutating command) prints what *would* happen without calling the API.
+- `--fields a,b,c` and `--limit N` on the `list` commands keep output small and focused.
+
+```
+$ xdr-cli --json --read-only endpoint list --platform linux --fields endpoint_name,ip --limit 5
+{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...]}
+
+$ xdr-cli --json endpoint isolate --hostname DESKTOP-V24D23 --dry-run
+{"ok": true, "data": {"dry_run": true, "action": "isolate", "endpoint_id": null, "hostname": "DESKTOP-V24D23"}}
+```
+
+When no XQL query is supplied and stdin is not a TTY, `xdr-cli` fails fast instead of trying
+to open an editor.
+
+# Response actions
+
+```
+$ xdr-cli --profile demo endpoint isolate --hostname DESKTOP-V24D23
+$ xdr-cli --profile demo endpoint unisolate --endpoint-id 1bd16395ef5a44a1db13033e461d012a
+$ xdr-cli --profile demo endpoint scan --hostname DESKTOP-V24D23
+$ xdr-cli --profile demo endpoint scan --all --platform windows
+$ xdr-cli --profile demo file quarantine --hostname DESKTOP-V24D23 --path 'C:\Temp\evil.exe' --sha256 <hash>
+$ xdr-cli --profile demo file restore --sha256 <hash>
+```
+
+# MCP server
+
+`xdr-cli` can expose the same operations to AI agents over the Model Context Protocol
+(stdio). Install the extra and run the server:
+
+```
+$ pip install '.[mcp]'
+$ xdr-cli mcp serve --default-tenant demo
+```
+
+Each MCP tool accepts an optional `tenant` argument (falling back to `--default-tenant`).
+Mutating tools (isolate, scan, close, ...) are hidden entirely when the server is started
+with `--read-only` or `XDR_CLI_READONLY=1`.
 
 # Shell completion
 
@@ -250,6 +311,13 @@ You can run execute Python scripts directly on a list of endpoint hostnames:
 $ echo 'print "Hello world"' >  hello.py
 $ xdr-cli -p demo script run --hostname DESKTOP-V24D23 --hostname DESKTOP-4UB2  hello.py
 {"action_id": 522, "status": 1, "endpoints_count": 2}
+```
+
+Add `--wait` to block until the script finishes and return its results in one call (handy
+for agents, which otherwise have to poll `script status` and then `script results`):
+
+```
+$ xdr-cli -p demo script run --hostname DESKTOP-V24D23 --wait hello.py
 ```
 
 You can also specify endpoint IDs directly, or mix endpoint IDs and hostnames. Endpoint IDs avoid a hostname lookup round trip:

@@ -18,3 +18,4 @@ class XdrClientOptions:
     timeout_seconds: float = 30.0
     user_agent: str = "xdr-cli-library/0.1"
     verify_ssl: bool = True
+    read_only: bool = False

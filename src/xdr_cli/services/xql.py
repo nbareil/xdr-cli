@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from ..errors import XdrValidationError
+from ..errors import XdrOperationTimeoutError, XdrValidationError
 from .base import BaseService
 
 
 class XqlService(BaseService):
-    async def run(self, query: str, begin_time: Optional[datetime] = None, end_time: Optional[datetime] = None) -> List[Dict]:
+    async def run(
+        self,
+        query: str,
+        begin_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        poll_interval_seconds: float = 2.0,
+        poll_attempts: int = 150,
+    ) -> List[Dict]:
         if not query:
             raise XdrValidationError("query must not be empty")
         params = {"request_data": {"query": query}}
@@ -24,13 +32,24 @@ class XqlService(BaseService):
             "request_data": {
                 "query_id": query_id,
                 "format": "json",
-                "pending_flag": False,
+                "pending_flag": True,
             }
         }
-        obj = await self.transport.post_json("xql/get_query_results", results_payload)
-        reply = obj.get("reply", {})
-        if reply.get("status") != "SUCCESS":
-            raise XdrValidationError("xql/get_query_results failed: %s" % json.dumps(obj))
+        attempts = 0
+        while True:
+            obj = await self.transport.post_json("xql/get_query_results", results_payload)
+            reply = obj.get("reply", {})
+            status = reply.get("status")
+            if status == "SUCCESS":
+                break
+            if status != "PENDING":
+                raise XdrValidationError("xql/get_query_results failed: %s" % json.dumps(obj))
+            attempts += 1
+            if attempts >= poll_attempts:
+                raise XdrOperationTimeoutError(
+                    "Timed out waiting for XQL query %s to complete" % query_id
+                )
+            await asyncio.sleep(poll_interval_seconds)
         if reply.get("number_of_results", 0) <= 1000:
             return list(reply.get("results", {}).get("data", []))
         stream_id = reply.get("results", {}).get("stream_id")

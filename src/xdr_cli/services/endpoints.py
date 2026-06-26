@@ -7,17 +7,17 @@ from .base import BaseService
 
 
 class EndpointsService(BaseService):
-    async def list(self, platform: Optional[str] = None) -> List[Dict]:
+    async def list(self, platform: Optional[str] = None, limit: Optional[int] = None) -> List[Dict]:
         params = {"request_data": {"filters": []}}
         if platform:
             params["request_data"]["filters"].append(
                 {"field": "platform", "operator": "in", "value": [platform]}
             )
-        pages = await self._paginated_post("endpoints/get_endpoint", params)
+        pages = await self._paginated_post("endpoints/get_endpoint", params, limit=limit)
         endpoints = []
         for obj in pages:
             endpoints.extend(obj.get("reply", {}).get("endpoints", []))
-        return endpoints
+        return endpoints[:limit] if limit is not None else endpoints
 
     async def get_by_hostname(self, hostname: str) -> List[Dict]:
         parameters = {

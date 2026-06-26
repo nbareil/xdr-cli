@@ -12,6 +12,7 @@ class TriageService(BaseService):
         return obj.get("reply", {}).get("triage_presets", [])
 
     async def start(self, agent_ids: List[str], collector_uuid: Optional[str] = None) -> Dict:
+        self._ensure_writable("triage new")
         if not agent_ids:
             raise XdrValidationError("agent_ids must not be empty")
         request_data = {"agent_ids": agent_ids}

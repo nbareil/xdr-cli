@@ -4,6 +4,7 @@ from .errors import (
     XdrError,
     XdrNotFoundError,
     XdrOperationTimeoutError,
+    XdrReadOnlyError,
     XdrTransportError,
     XdrValidationError,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "XdrValidationError",
     "XdrNotFoundError",
     "XdrOperationTimeoutError",
+    "XdrReadOnlyError",
 ]
 
 

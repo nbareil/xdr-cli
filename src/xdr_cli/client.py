@@ -4,6 +4,7 @@ from typing import Optional
 
 from .http import XdrTransport
 from .models import XdrClientOptions, XdrTenant
+from .services.actions import ResponseActionsService
 from .services.alerts import AlertsService
 from .services.endpoints import EndpointsService
 from .services.files import FilesService
@@ -23,6 +24,7 @@ class XdrClient:
         self.scripts = ScriptsService(self)
         self.files = FilesService(self)
         self.xql = XqlService(self)
+        self.actions = ResponseActionsService(self)
 
     async def aclose(self) -> None:
         await self.transport.aclose()

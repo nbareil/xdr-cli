@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from typing import Dict, List, Optional
 
-from ..errors import XdrValidationError
+from ..errors import XdrOperationTimeoutError, XdrValidationError
+from .actions import FINAL_ACTION_STATES
 from .base import BaseService
 
 
@@ -90,9 +92,9 @@ class ScriptsService(BaseService):
         endpoint_ids: Optional[List[str]] = None,
         hostnames: Optional[List[str]] = None,
         timeout: int = 600,
-        name: Optional[str] = None,
         incident_id: Optional[str] = None,
     ) -> Dict:
+        self._ensure_writable("script run")
         target_ids = []
         seen = set()
         for endpoint_id in endpoint_ids or []:
@@ -121,6 +123,42 @@ class ScriptsService(BaseService):
             params["request_data"]["incident_id"] = str(incident_id)
         obj = await self.transport.post_json("scripts/run_snippet_code_script", params)
         return obj.get("reply", {})
+
+    async def run_snippet_and_wait(
+        self,
+        script_content: str,
+        endpoint_ids: Optional[List[str]] = None,
+        hostnames: Optional[List[str]] = None,
+        timeout: int = 600,
+        incident_id: Optional[str] = None,
+        poll_interval_seconds: float = 5.0,
+        poll_attempts: Optional[int] = 120,
+    ) -> Dict:
+        """Run a snippet, poll until the action completes, and return results."""
+        reply = await self.run_snippet(
+            script_content=script_content,
+            endpoint_ids=endpoint_ids,
+            hostnames=hostnames,
+            timeout=timeout,
+            incident_id=incident_id,
+        )
+        action_id = reply.get("action_id")
+        if not action_id:
+            return reply
+        attempts = 0
+        while True:
+            status = await self.execution_status(int(action_id))
+            general = status.get("general_status", "")
+            if general in FINAL_ACTION_STATES:
+                break
+            attempts += 1
+            if poll_attempts is not None and attempts >= poll_attempts:
+                raise XdrOperationTimeoutError(
+                    "Timed out waiting for script action %s" % action_id
+                )
+            await asyncio.sleep(poll_interval_seconds)
+        results = await self.execution_results(int(action_id))
+        return {"action_id": action_id, "status": status, "results": results}
 
     async def execution_results(self, action_id: int) -> Dict:
         obj = await self.transport.post_json("scripts/get_script_execution_results", {"request_data": {"action_id": action_id}})
@@ -153,7 +191,7 @@ class ScriptsService(BaseService):
         actions = []
         for index in range(0, len(endpoint_ids), batch_size):
             batch = endpoint_ids[index:index + batch_size]
-            reply = await self.run_snippet(script_content=script_content, endpoint_ids=batch, timeout=timeout, name="yara_memory_scan")
+            reply = await self.run_snippet(script_content=script_content, endpoint_ids=batch, timeout=timeout)
             actions.append(reply.get("action_id"))
         return {"actions_id": actions}
 

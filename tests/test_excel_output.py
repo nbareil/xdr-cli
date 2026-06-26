@@ -38,3 +38,30 @@ def test_write_xql_results_excel_keeps_first_row():
     assert cells['A1'] == 'a'
     assert cells['A2'] == '1'
     assert cells['A3'] == '2'
+
+
+def test_write_xql_results_excel_unions_columns():
+    # Second row introduces a key the first row lacks; it must not be dropped.
+    rows = [{"a": 1}, {"a": 2, "c": "extra"}]
+    with tempfile.NamedTemporaryFile(suffix='.xlsx') as tmp:
+        write_xql_results_excel(rows, tmp.name)
+        cells = _read_sheet_cells(tmp.name)
+    assert cells['A1'] == 'a'
+    assert cells['B1'] == 'c'      # second column = union key
+    assert cells['B3'] == 'extra'  # row 2 value present
+
+
+def test_write_xql_results_excel_json_encodes_nested_cells():
+    rows = [{"a": {"nested": True}, "b": [1, 2, 3]}]
+    with tempfile.NamedTemporaryFile(suffix='.xlsx') as tmp:
+        write_xql_results_excel(rows, tmp.name)
+        cells = _read_sheet_cells(tmp.name)
+    assert '"nested"' in cells['A2']
+    assert cells['B2'] == '[1, 2, 3]'
+
+
+def test_write_xql_results_excel_empty():
+    with tempfile.NamedTemporaryFile(suffix='.xlsx') as tmp:
+        write_xql_results_excel([], tmp.name)
+        cells = _read_sheet_cells(tmp.name)
+    assert cells == {}

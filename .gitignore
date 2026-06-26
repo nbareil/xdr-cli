@@ -169,3 +169,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# xdr-cli local dev artifacts (scratch files, captured outputs)
+/hello.py
+/o
+/script_output.zip
+/.codex

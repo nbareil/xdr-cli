@@ -26,6 +26,10 @@ class XdrTransport:
     def tenant(self) -> XdrTenant:
         return self._tenant
 
+    @property
+    def options(self) -> XdrClientOptions:
+        return self._options
+
     def _normalized_api_host(self) -> str:
         base = self._tenant.tenant_base_url.strip()
         base = base.replace("https://", "").replace("http://", "").strip("/")

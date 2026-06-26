@@ -1,32 +1,30 @@
-import base64
 import asyncio
 import io
-import tempfile
-import subprocess
-import os
-import pathlib
-import hashlib
-import gzip
 import json
 import logging
+import os
+import pathlib
 import re
 import shutil
-import time
 import sys
-import string
-import secrets
+import tempfile
+import subprocess
 import zipfile
-from typing import Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import requests
 import click
 
-from typing import List
-from datetime import datetime, timezone
-
 from .client import XdrClient
-from .errors import XdrError, XdrNotFoundError, XdrValidationError
-from .models import XdrCredentials, XdrTenant
+from .errors import XdrError
+from .models import XdrClientOptions, XdrCredentials, XdrTenant
+from .output.envelope import (
+    EXIT_NOT_FOUND,
+    EXIT_USAGE,
+    emit,
+    emit_error,
+    error_code_for,
+    exit_code_for,
+)
 from .output.excel import write_xql_results_excel
 
 # API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
@@ -45,6 +43,30 @@ def _set_log_level(level: int) -> None:
     root.setLevel(level)
 
 
+# --------------------------------------------------------------------------- #
+# Auth file helpers (secure, atomic)
+# --------------------------------------------------------------------------- #
+def _load_auth(auth_file: str = AUTH_FILE) -> Dict[str, dict]:
+    with open(auth_file, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_auth(tenants: Dict[str, dict], auth_file: str = AUTH_FILE) -> None:
+    directory = os.path.dirname(os.path.abspath(auth_file)) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".xdr-cli-auth-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(tenants, fh)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, auth_file)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _tenant_from_ctx(ctx: click.Context) -> XdrTenant:
     base_url = (ctx.obj or {}).get("base_url", "")
     api_key_id = (ctx.obj or {}).get("api_key_id", "")
@@ -60,17 +82,70 @@ def _tenant_from_ctx(ctx: click.Context) -> XdrTenant:
     )
 
 
-def _run_with_xdr_client(ctx: click.Context, op):
+def _client_options(ctx: click.Context) -> XdrClientOptions:
+    read_only = bool((ctx.obj or {}).get("read_only")) or bool(
+        os.environ.get("XDR_CLI_READONLY")
+    )
+    return XdrClientOptions(read_only=read_only)
+
+
+def _run_with_xdr_client(ctx: click.Context, op: Callable[[XdrClient], Any]) -> Any:
     async def _runner():
-        async with XdrClient(_tenant_from_ctx(ctx)) as client:
+        async with XdrClient(_tenant_from_ctx(ctx), options=_client_options(ctx)) as client:
             return await op(client)
 
+    return asyncio.run(_runner())
+
+
+def _execute(ctx: click.Context, op: Callable[[XdrClient], Any]) -> Any:
+    """Run an async op against the XDR client, mapping library errors to a
+    structured error + stable exit code. Never returns on error."""
     try:
-        return asyncio.run(_runner())
+        return _run_with_xdr_client(ctx, op)
     except XdrError as exc:
-        raise click.ClickException(str(exc))
+        emit_error(ctx, error_code_for(exc), str(exc), exit_code_for(exc))
+        raise  # unreachable: emit_error raises SystemExit
 
 
+def _json_mode(ctx: click.Context) -> bool:
+    return bool((ctx.obj or {}).get("json"))
+
+
+def _project(item: Dict, fields: Optional[List[str]]) -> Dict:
+    if not fields:
+        return item
+    return {f: item.get(f, "N/A") for f in fields}
+
+
+def _parse_fields(fields: Optional[str]) -> Optional[List[str]]:
+    if not fields:
+        return None
+    return [f.strip() for f in fields.split(",") if f.strip()]
+
+
+def _render_list(ctx: click.Context, items: List[Dict], fields: Optional[List[str]] = None, indent: Optional[int] = None) -> None:
+    projected = [_project(i, fields) for i in items] if fields else items
+    if _json_mode(ctx):
+        emit(ctx, projected)
+        return
+    for item in projected:
+        click.echo(json.dumps(item, indent=indent))
+
+
+def _render_obj(ctx: click.Context, obj: Any, indent: Optional[int] = None) -> None:
+    if _json_mode(ctx):
+        emit(ctx, obj)
+        return
+    click.echo(json.dumps(obj, indent=indent))
+
+
+def _readonly_active(ctx: click.Context) -> bool:
+    return _client_options(ctx).read_only
+
+
+# --------------------------------------------------------------------------- #
+# Root group
+# --------------------------------------------------------------------------- #
 @click.group()
 @click.option("--verbose", default=False, help="Verbose mode", is_flag=True)
 @click.option("--debug", default=False, help="Debug mode", is_flag=True)
@@ -78,318 +153,353 @@ def _run_with_xdr_client(ctx: click.Context, op):
 @click.option("--api-key-id", default="", help="API Key ID")
 @click.option("--api-key-hash", default="", help="API Key Hash")
 @click.option("--profile", "-p", default="", help="Select XDR tenant")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit a structured {ok,data,error} JSON envelope")
+@click.option("--read-only", is_flag=True, default=False, help="Refuse all mutating operations (also via XDR_CLI_READONLY)")
 @click.pass_context
-def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile):
-    # ensure that ctx.obj exists and is a dict (in case `cli()` is called
-    # by means other than the `if` block below)
+def cli(ctx, base_url, verbose, debug, api_key_id, api_key_hash, profile, json_output, read_only):
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
     ctx.obj["debug"] = debug
+    ctx.obj["json"] = json_output
+    ctx.obj["read_only"] = read_only
     if verbose:
         _set_log_level(logging.INFO)
     if debug:
         _set_log_level(logging.DEBUG)
     if profile:
-        profiles = json.load(open(AUTH_FILE))
+        try:
+            profiles = _load_auth()
+        except FileNotFoundError:
+            emit_error(ctx, "CONFIG", f"Auth file not found: {AUTH_FILE}", EXIT_USAGE)
+            return
+        except json.JSONDecodeError as exc:
+            emit_error(ctx, "CONFIG", f"Failed to parse {AUTH_FILE}: {exc}", EXIT_USAGE)
+            return
         if profile in profiles:
             ctx.obj["base_url"] = profiles[profile]["base_url"]
             ctx.obj["api_key_id"] = profiles[profile]["api_key_id"]
             ctx.obj["api_key_hash"] = profiles[profile]["api_key_hash"]
         else:
-            logger.error(
-                "This profile does not exist, please use one of the followings:\n"
-                + "\n".join(map(lambda s: f" - {s}", profiles))
+            available = "\n".join(f" - {s}" for s in profiles)
+            emit_error(
+                ctx,
+                "CONFIG",
+                "Profile %r does not exist, available profiles:\n%s" % (profile, available),
+                EXIT_USAGE,
             )
-            sys.exit(2)
+            return
     else:
         ctx.obj["base_url"] = base_url
         ctx.obj["api_key_id"] = api_key_id
         ctx.obj["api_key_hash"] = api_key_hash
     if (
         not all([ctx.obj["base_url"], ctx.obj["api_key_id"], ctx.obj["api_key_hash"]])
-        and ctx.invoked_subcommand not in {"config", "slack"}
+        and ctx.invoked_subcommand not in {"config", "slack", "mcp", "completion"}
     ):
-        click.echo("Missing authentication bits")
+        click.echo("Missing authentication bits", err=True)
 
 
-def _load_tenants_from_auth_file(auth_file: str) -> Dict[str, XdrTenant]:
-    try:
-        raw = json.load(open(auth_file))
-    except FileNotFoundError:
-        raise click.ClickException(f"Auth file not found: {auth_file}")
-    except json.JSONDecodeError as exc:
-        raise click.ClickException(f"Failed to parse auth file {auth_file}: {exc}")
-
-    tenants: Dict[str, XdrTenant] = {}
-    for alias, cfg in raw.items():
-        try:
-            tenants[alias] = XdrTenant(
-                tenant_base_url=str(cfg["base_url"]),
-                credentials=XdrCredentials(
-                    api_key_id=str(cfg["api_key_id"]),
-                    api_key_hash=str(cfg["api_key_hash"]),
-                ),
-            )
-        except KeyError as exc:
-            raise click.ClickException(
-                f"Tenant profile '{alias}' is missing required field: {exc}"
-            )
-    return tenants
-
-
-def generate_auth_headers(api_key_id, api_key) -> dict:
-    nonce = "".join(
-        [secrets.choice(string.ascii_letters + string.digits) for _ in range(64)]
-    )
-    timestamp = int(datetime.now(timezone.utc).timestamp()) * 1000
-    auth_key = "%s%s%s" % (api_key, nonce, timestamp)
-    auth_key = auth_key.encode("utf-8")
-    api_key_hash = hashlib.sha256(auth_key).hexdigest()
-    headers = {
-        "x-xdr-timestamp": str(timestamp),
-        "x-xdr-nonce": nonce,
-        "x-xdr-auth-id": str(api_key_id),
-        "Authorization": api_key_hash,
-    }
-    return headers
-
-
-class XDRException(Exception):
-    pass
-
-
-def do_requests_post(
-    ctx: click.Context, uri: str, parameters: dict = None, headers: dict = None
-) -> requests.Response:
-    parameters = parameters or {}
-    req_headers = dict(headers or {})
-    req_headers.update(
-        **generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"])
-    )
-    base = str(ctx.obj.get("base_url") or "").strip().replace("https://", "").replace("http://", "").strip("/")
-    base = base.split("/", 1)[0]
-    if not base.startswith("api-"):
-        base = f"api-{base}"
-    url = f"https://{base}/public_api/v1/{uri}"
-    res = requests.post(url, headers=req_headers, json=parameters)
-    if res.status_code != 200:
-        raise XDRException(
-            f"{uri} failed with {res.status_code}: {res.reason} {res.text}"
-        )
-    return res
-
-
+# --------------------------------------------------------------------------- #
+# Incident
+# --------------------------------------------------------------------------- #
 @cli.group()
 @click.pass_context
 def incident(ctx):
     pass
 
 
+@incident.command("list")
+@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
+@click.option("--limit", "-l", help="Stop after N incidents", type=int, default=None)
+@click.pass_context
+def list_incidents(ctx: click.Context, fields: Optional[str], limit: Optional[int]):
+    incidents = _execute(ctx, lambda client: client.incidents.list(limit=limit))
+    _render_list(ctx, incidents, fields=_parse_fields(fields))
+
+
+@incident.command("get")
+@click.argument("incident_id")
+@click.pass_context
+def get_incident(ctx: click.Context, incident_id: str) -> None:
+    obj = _execute(ctx, lambda client: client.incidents.get(incident_id))
+    _render_obj(ctx, obj)
+
+
+@incident.command("close")
+@click.argument("incident_id")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def close_incident(ctx: click.Context, incident_id: str, dry_run: bool):
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "incident close", "incident_id": incident_id})
+        return
+    obj = _execute(ctx, lambda client: client.incidents.close(incident_id))
+    _render_obj(ctx, obj)
+
+
+# --------------------------------------------------------------------------- #
+# Alert
+# --------------------------------------------------------------------------- #
+@cli.group()
+@click.pass_context
+def alert(ctx):
+    pass
+
+
+@alert.command("list")
+@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
+@click.option("--limit", "-l", help="Stop after N alerts", type=int, default=None)
+@click.pass_context
+def list_alerts(ctx: click.Context, fields: Optional[str], limit: Optional[int]):
+    alerts = _execute(ctx, lambda client: client.alerts.list(limit=limit))
+    _render_list(ctx, alerts, fields=_parse_fields(fields))
+
+
+@alert.command("close")
+@click.argument("alert_id", type=int, nargs=-1)
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def close_alert(ctx: click.Context, alert_id: List[int], dry_run: bool):
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "alert close", "alert_ids": list(alert_id)})
+        return
+    obj = _execute(ctx, lambda client: client.alerts.close(list(alert_id)))
+    _render_obj(ctx, obj)
+
+
+# --------------------------------------------------------------------------- #
+# Endpoint
+# --------------------------------------------------------------------------- #
+@cli.group()
+@click.pass_context
+def endpoint(ctx: click.Context):
+    pass
+
+
+@endpoint.command("list")
+@click.option("--platform", "-p", help="Filter by platform: linux, windows, macos, android", type=str)
+@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
+@click.option("--limit", "-l", help="Stop after N endpoints", type=int, default=None)
+@click.pass_context
+def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, limit: Optional[int] = None):
+    """List endpoints, optionally filtered by platform."""
+    endpoints = _execute(ctx, lambda client: client.endpoints.list(platform=platform or None, limit=limit))
+    _render_list(ctx, endpoints, fields=_parse_fields(fields), indent=4)
+
+
+@endpoint.command("get")
+@click.argument("hostname")
+@click.option("--field", "-f", help="Return only this field", type=str)
+@click.pass_context
+def endpoint_get(ctx: click.Context, hostname: str, field: str = None):
+    """Get more information about an endpoint."""
+    endpoints = _execute(ctx, lambda client: client.endpoints.get_by_hostname(hostname))
+    if _json_mode(ctx):
+        emit(ctx, [_project(e, [field]) for e in endpoints] if field else endpoints)
+        return
+    for ep in endpoints:
+        if field:
+            click.echo(ep.get(field, "N/A"))
+        else:
+            click.echo(json.dumps(ep, indent=4))
+
+
+@endpoint.command("who-has")
+@click.argument("ip")
+@click.option("--raw", is_flag=True, help="Display the whole endpoint object")
+@click.pass_context
+def endpoint_who_has(ctx: click.Context, ip: str, raw: bool = False):
+    """Resolve an IP address to a hostname."""
+    endpoints = _execute(ctx, lambda client: client.endpoints.who_has(ip))
+    if not endpoints:
+        emit_error(ctx, "ENDPOINT_NOT_FOUND", "No endpoint matched IP %s" % ip, EXIT_NOT_FOUND)
+        return
+    if _json_mode(ctx):
+        emit(ctx, endpoints if raw else [e.get("endpoint_name") for e in endpoints])
+        return
+    for ep in endpoints:
+        if raw:
+            click.echo(json.dumps(ep, indent=4))
+        else:
+            click.echo(ep["endpoint_name"])
+
+
+def _target_kwargs(endpoint_id: Optional[str], hostname: Optional[str]) -> Dict[str, Optional[str]]:
+    return {"endpoint_id": endpoint_id, "hostname": hostname}
+
+
+@endpoint.command("isolate")
+@click.option("--endpoint-id", "-e", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def endpoint_isolate(ctx: click.Context, endpoint_id: str, hostname: str, dry_run: bool):
+    """Network-isolate an endpoint."""
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "isolate", **_target_kwargs(endpoint_id, hostname)})
+        return
+    obj = _execute(ctx, lambda c: c.actions.isolate(endpoint_id=endpoint_id, hostname=hostname))
+    _render_obj(ctx, obj)
+
+
+@endpoint.command("unisolate")
+@click.option("--endpoint-id", "-e", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def endpoint_unisolate(ctx: click.Context, endpoint_id: str, hostname: str, dry_run: bool):
+    """Remove network isolation from an endpoint."""
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "unisolate", **_target_kwargs(endpoint_id, hostname)})
+        return
+    obj = _execute(ctx, lambda c: c.actions.unisolate(endpoint_id=endpoint_id, hostname=hostname))
+    _render_obj(ctx, obj)
+
+
+@endpoint.command("scan")
+@click.option("--endpoint-id", "-e", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--all", "all_endpoints", is_flag=True, help="Scan all endpoints matching --platform")
+@click.option("--platform", type=str, help="Platform filter when using --all")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def endpoint_scan(ctx: click.Context, endpoint_id: str, hostname: str, all_endpoints: bool, platform: str, dry_run: bool):
+    """Trigger a malware scan on an endpoint (or all of a platform)."""
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "scan", "all": all_endpoints, "platform": platform, **_target_kwargs(endpoint_id, hostname)})
+        return
+    obj = _execute(
+        ctx,
+        lambda c: c.actions.scan(endpoint_id=endpoint_id, hostname=hostname, all_endpoints=all_endpoints, platform=platform),
+    )
+    _render_obj(ctx, obj)
+
+
+# --------------------------------------------------------------------------- #
+# Triage
+# --------------------------------------------------------------------------- #
+@cli.group()
+@click.pass_context
+def triage(ctx: click.Context):
+    pass
+
+
+@triage.command("presets")
+@click.pass_context
+def triage_presets(ctx: click.Context):
+    presets = _execute(ctx, lambda client: client.triage.presets())
+    _render_list(ctx, presets)
+
+
+@triage.command("new")
+@click.argument("hostname")
+@click.option("--collector-uuid", "-c", help="Triage configuration UUID (optional)", type=str, default="")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
+@click.pass_context
+def triage_new(ctx: click.Context, hostname: str, collector_uuid: str, dry_run: bool):
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "triage new", "hostname": hostname, "collector_uuid": collector_uuid or None})
+        return
+    reply = _execute(
+        ctx,
+        lambda client: client.triage.start_by_hostname(hostname, collector_uuid=collector_uuid or None),
+    )
+    _render_obj(ctx, reply)
+
+
+@triage.command("status")
+@click.argument("group_action_id", type=int, nargs=-1)
+@click.pass_context
+def triage_status(ctx: click.Context, group_action_id: Tuple[int, ...]):
+    if not group_action_id:
+        emit_error(ctx, "VALIDATION", "Provide one or more action IDs", EXIT_USAGE)
+        return
+    payloads = _execute(ctx, lambda client: client.triage.statuses(list(group_action_id)))
+    _render_list(ctx, payloads)
+
+
+# --------------------------------------------------------------------------- #
+# Script
+# --------------------------------------------------------------------------- #
 @cli.group()
 @click.pass_context
 def script(ctx):
     pass
 
 
-py_yara_base_script = r"""
-import base64
-import json
-import logging
-import os
-
-import yara
-import psutil
-
-yara_rules = base64.b64decode('XXX_XDR_CLI_INSERT_YARA_CONTENT_XXX').decode("utf-8")
-
-# Do not edit past this line
-# ------------------------------------------------------------------
-
-logger = logging.getLogger("xdr_yara_process_scan")
-logging.basicConfig(level=logging.ERROR)
-
-def is_expected_yara_error(err: yara.Error):
-    for arg in err.args:
-        if "access denied" in arg:
-            return True
-        elif "internal error: 47" in arg:
-            # #define ERROR_COULD_NOT_READ_PROCESS_MEMORY  47
-            # https://github.com/VirusTotal/yara/blob/master/libyara/include/yara/error.h#L94C1-L95C1
-            return True
-    return False
-
-class BytesEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, bytes):
-            return base64.b64encode(o).decode("ascii")
-        else:
-            return super().default(o)
-
-
-allow_list_exe = [
-    "C:\\Program Files\\Palo Alto Networks\\Traps\\tlaworker.exe",
-    "C:\\Program Files\\Palo Alto Networks\\Traps\\cysandbox.exe",
-    "C:\\Program Files (x86)\\ossec-agent\\wazuh-agent.exe",
-]
-
-def yara_process_scan():
-    rules = yara.compile(source=yara_rules)
-    for process in psutil.process_iter():
-        if process.pid == os.getpid():
-            # Don't scan yourself
-            continue
-        logger.debug(f"Scanning process Name={process.name()} PID={process.pid}")
-        try:
-            matches = rules.match(pid=process.pid)
-        except yara.Error as err:
-            if is_expected_yara_error(err):
-                log_func  = logger.warning
-            else:
-                log_func = logger.error
-            log_func(f"Failed to scan process name {process.name()} PID={process.pid}: Error {err=}")
-            continue
-        if not matches:
-            continue
-        if process.exe() in allow_list_exe:
-            continue
-        logger.info(f"Process Name={process.name()} PID={process.pid} matched {len(matches)} Yara rules")
-        obj = {
-            "process": {
-                "name": process.name(),
-                "pid": process.pid,
-                "ppid": process.ppid(),
-                "cmdline": process.cmdline(),
-                "exe": process.exe(),
-            }
-        }
-        for m in matches:
-            obj[m.rule] = {}
-            for (offset, str_id, matched_data) in m.strings:
-                obj[m.rule][str_id] = matched_data
-        print(json.dumps(obj, cls=BytesEncoder))
-
-
-if __name__ == "__main__":
-    yara_process_scan()
-"""
-
-
-def build_py_script_from_yara(yara):
-    b64blob = base64.b64encode(yara.read()).decode("utf-8")
-    final_pyscript = py_yara_base_script.replace(
-        "XXX_XDR_CLI_INSERT_YARA_CONTENT_XXX", b64blob
-    )
-    return final_pyscript
-
-
-def do_script_run(ctx, name: str, script, endpoint_id: List[str], timeout: int):
-    if hasattr(script, "seek"):
-        script.seek(0)
-    script_content = script.read()
-    params = dict(
-        request_data={
-            "timeout": timeout,
-            "snippet_code": script_content,
-            "filters": [
-                {
-                    "field": "endpoint_id_list",
-                    "operator": "in",
-                    "value": endpoint_id,
-                },
-            ],
-        }
-    )
-    res = do_requests_post(ctx, "scripts/run_snippet_code_script", params)
-    obj = res.json()
-    click.echo(json.dumps(obj["reply"]))
-    return obj["reply"]
-
 @script.command()
 @click.pass_context
-@click.option("--name", "-n", help="Script name", type=str)
 @click.option("--incident-id", help="Associate the script execution with an incident ID", type=str)
-@click.option(
-    "--endpoint_id",
-    "-e",
-    help="Endpoint where to execute the script",
-    type=str,
-    multiple=True,
-)
-@click.option(
-    "--hostname",
-    help="Endpoint hostname where to execute the script",
-    type=str,
-    multiple=True,
-)
-@click.option(
-    "--timeout",
-    "-t",
-    help="Execution timeout for the script (in seconds)",
-    default=600,
-    type=int,
-)
+@click.option("--endpoint_id", "-e", help="Endpoint where to execute the script", type=str, multiple=True)
+@click.option("--hostname", help="Endpoint hostname where to execute the script", type=str, multiple=True)
+@click.option("--timeout", "-t", help="Execution timeout for the script (in seconds)", default=600, type=int)
+@click.option("--wait", is_flag=True, help="Block until the script completes and return its results")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
 @click.argument("script", type=click.File())
 def run(
     ctx,
-    name: str,
     incident_id: str,
     script: io.FileIO,
     endpoint_id: List[str],
     hostname: List[str],
     timeout: int,
+    wait: bool,
+    dry_run: bool,
 ):
-    reply = _run_with_xdr_client(
-        ctx,
-        lambda client: client.scripts.run_snippet(
-            script_content=script.read(),
-            endpoint_ids=list(endpoint_id),
-            hostnames=list(hostname),
-            timeout=timeout,
-            name=name,
-            incident_id=incident_id,
-        ),
-    )
-    click.echo(json.dumps(reply))
+    """Run a Python snippet on one or more endpoints."""
+    content = script.read()
+    if dry_run:
+        _render_obj(ctx, {
+            "dry_run": True,
+            "action": "script run",
+            "endpoint_ids": list(endpoint_id),
+            "hostnames": list(hostname),
+            "timeout": timeout,
+            "bytes": len(content),
+        })
+        return
+    if wait:
+        reply = _execute(
+            ctx,
+            lambda client: client.scripts.run_snippet_and_wait(
+                script_content=content,
+                endpoint_ids=list(endpoint_id),
+                hostnames=list(hostname),
+                timeout=timeout,
+                incident_id=incident_id,
+            ),
+        )
+    else:
+        reply = _execute(
+            ctx,
+            lambda client: client.scripts.run_snippet(
+                script_content=content,
+                endpoint_ids=list(endpoint_id),
+                hostnames=list(hostname),
+                timeout=timeout,
+                incident_id=incident_id,
+            ),
+        )
+    _render_obj(ctx, reply)
 
 
 @script.command
 @click.argument("yara_ruleset", type=click.File("rb"))
-@click.option(
-    "--all",
-    "-a",
-    help="Select all endpoints matching platform",
-    default=False,
-    is_flag=True,
-)
-@click.option(
-    "--endpoint",
-    "-e",
-    help="Execute the Yara scan only on these selected endpoints",
-    type=str,
-    multiple=True,
-)
-@click.option(
-    "--platform",
-    "-p",
-    help="Filter by platform name: linux, windows, macos, android",
-    multiple=True,
-    type=str,
-)
+@click.option("--all", "-a", help="Select all endpoints matching platform", default=False, is_flag=True)
+@click.option("--endpoint", "-e", help="Execute the Yara scan only on these endpoints", type=str, multiple=True)
+@click.option("--platform", "-p", help="Filter by platform name: linux, windows, macos, android", multiple=True, type=str)
 @click.pass_context
-def yara_memory_scan(
-    ctx, yara_ruleset: io.FileIO, all: bool, platform: List[str], endpoint: List[str]
-):
+def yara_memory_scan(ctx, yara_ruleset: io.FileIO, all: bool, platform: List[str], endpoint: List[str]):
     if not (all or endpoint):
-        logger.error("Select --all or --endpoint to target endpoints")
+        emit_error(ctx, "VALIDATION", "Select --all or --endpoint to target endpoints", EXIT_USAGE)
+        return
     if all and endpoint:
-        logger.error(
-            "Options --all and --endpoint are mutually exclusive, please select only one"
-        )
-        sys.exit(2)
+        emit_error(ctx, "VALIDATION", "Options --all and --endpoint are mutually exclusive", EXIT_USAGE)
+        return
     if all and not platform:
-        logger.error("Option --all requires to select --platform")
-        sys.exit(3)
-    result = _run_with_xdr_client(
+        emit_error(ctx, "VALIDATION", "Option --all requires --platform", EXIT_USAGE)
+        return
+    result = _execute(
         ctx,
         lambda client: client.scripts.yara_memory_scan(
             yara_ruleset_bytes=yara_ruleset.read(),
@@ -398,450 +508,79 @@ def yara_memory_scan(
             timeout=600,
         ),
     )
-    click.echo(json.dumps(result))
+    _render_obj(ctx, result)
 
 
 @script.command
 @click.pass_context
 @click.argument("action_id", type=int)
 def results(ctx, action_id):
-    obj = _run_with_xdr_client(ctx, lambda client: client.scripts.execution_results(action_id))
-    click.echo(json.dumps(obj))
+    obj = _execute(ctx, lambda client: client.scripts.execution_results(action_id))
+    _render_obj(ctx, obj)
 
 
 @script.command
 @click.pass_context
 @click.argument("action_id", type=int)
 def status(ctx, action_id):
-    obj = _run_with_xdr_client(ctx, lambda client: client.scripts.execution_status(action_id))
-    click.echo(json.dumps(obj))
+    obj = _execute(ctx, lambda client: client.scripts.execution_status(action_id))
+    _render_obj(ctx, obj)
 
 
 @script.command
 @click.pass_context
 @click.argument("action_id", type=int)
 @click.argument("endpoint_id", type=str)
-def result_files(ctx, endpoint_id: str, action_id: str):
-    obj = _run_with_xdr_client(
+def result_files(ctx, endpoint_id: str, action_id: int):
+    obj = _execute(
         ctx,
         lambda client: client.scripts.result_files(action_id=int(action_id), endpoint_id=endpoint_id),
     )
-    click.echo(json.dumps(obj))
+    _render_obj(ctx, obj)
 
 
-@script.command
-@click.pass_context
-@click.argument("action_id", type=int)
-def get_execution_result(ctx, action_id):
-    pass
-
-
-def do_paginated_post_request(ctx: click.Context, uri: str, params: dict):
-    offset = -1
-    total_count = 0
-    while offset < total_count:
-        res = do_requests_post(ctx, uri, params)
-        obj = res.json()
-        yield obj
-        offset += obj["reply"]["result_count"]
-        total_count = obj["reply"]["total_count"]
-        params["request_data"]["search_from"] = offset
-        params["request_data"]["search_to"] = offset + 100
-
-
-def do_list_incidents(ctx: click.Context):
-    params = dict(request_data=dict())
-    for obj in do_paginated_post_request(ctx, "incidents/get_incidents", params):
-        yield obj["reply"]["incidents"]
-
-
-@incident.command("list")
-@click.pass_context
-def list_incidents(ctx: click.Context):
-    incidents = _run_with_xdr_client(ctx, lambda client: client.incidents.list())
-    for incident in incidents:
-        click.echo(json.dumps(incident))
-
-
-@incident.command("get")
-@click.argument("incident_id")
-@click.pass_context
-def get_incident(ctx: click.Context, incident_id: str) -> None:
-    obj = _run_with_xdr_client(ctx, lambda client: client.incidents.get(incident_id))
-    click.echo(json.dumps(obj))
-
-
-@incident.command("close")
-@click.argument("incident_id")
-@click.pass_context
-def close_incident(ctx: click.Context, incident_id: str):
-    obj = _run_with_xdr_client(ctx, lambda client: client.incidents.close(incident_id))
-    click.echo(json.dumps(obj))
-
-
+# --------------------------------------------------------------------------- #
+# File quarantine / restore
+# --------------------------------------------------------------------------- #
 @cli.group()
 @click.pass_context
-def alert(ctx):
+def file(ctx: click.Context):
+    """File response actions."""
     pass
 
 
-def do_alert_list(ctx: click.Context):
-    params = dict(request_data=dict())
-    for obj in do_paginated_post_request(ctx, "alerts/get_alerts", params):
-        alerts = obj["reply"]["alerts"]
-        yield from alerts
-
-
-@alert.command("list")
+@file.command("quarantine")
+@click.option("--endpoint-id", "-e", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--path", required=True, type=str, help="File path to quarantine")
+@click.option("--sha256", required=True, type=str, help="SHA256 of the file")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
 @click.pass_context
-def list_alerts(ctx: click.Context):
-    alerts = _run_with_xdr_client(ctx, lambda client: client.alerts.list())
-    for alert in alerts:
-        click.echo(json.dumps(alert))
+def file_quarantine(ctx, endpoint_id, hostname, path, sha256, dry_run):
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "quarantine", "path": path, "sha256": sha256, **_target_kwargs(endpoint_id, hostname)})
+        return
+    obj = _execute(ctx, lambda c: c.actions.quarantine(file_path=path, file_hash=sha256, endpoint_id=endpoint_id, hostname=hostname))
+    _render_obj(ctx, obj)
 
 
-@alert.command("close")
-@click.argument("alert_id", type=int, nargs=-1)
+@file.command("restore")
+@click.option("--endpoint-id", "-e", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname")
+@click.option("--sha256", required=True, type=str, help="SHA256 of the file to restore")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without calling the API")
 @click.pass_context
-def close_alert(ctx: click.Context, alert_id: List[int]):
-    obj = _run_with_xdr_client(ctx, lambda client: client.alerts.close(list(alert_id)))
-    click.echo(json.dumps(obj))
+def file_restore(ctx, endpoint_id, hostname, sha256, dry_run):
+    if dry_run:
+        _render_obj(ctx, {"dry_run": True, "action": "restore", "sha256": sha256, **_target_kwargs(endpoint_id, hostname)})
+        return
+    obj = _execute(ctx, lambda c: c.actions.restore(file_hash=sha256, endpoint_id=endpoint_id, hostname=hostname))
+    _render_obj(ctx, obj)
 
 
-@cli.group()
-@click.pass_context
-def endpoint(ctx: click.Context):
-    pass
-
-
-@cli.group()
-@click.pass_context
-def triage(ctx: click.Context):
-    pass
-
-
-@cli.command("completion")
-@click.argument("shell", required=False)
-@click.pass_context
-def completion(ctx: click.Context, shell: Optional[str]):
-    if not shell:
-        shell = os.path.basename(os.environ.get("SHELL", "")).lower()
-    if shell not in ("bash", "zsh"):
-        click.echo("Shell must be bash or zsh (or set $SHELL accordingly)")
-        sys.exit(2)
-    prog_name = ctx.info_name or "xdr-cli"
-    complete_name = prog_name.replace("-", "_").replace(".", "_")
-    complete_var = f"_{complete_name}_COMPLETE".upper()
-    completion_cls = click.shell_completion.get_completion_class(shell)
-    completion = completion_cls(cli, {}, prog_name, complete_var)
-    click.echo(completion.source())
-
-
-@endpoint.command("list")
-@click.option(
-    "--platform",
-    "-p",
-    help="Filter by platform name: linux, windows, macos, android",
-    type=str,
-)
-@click.pass_context
-def endpoint_list(ctx: click.Context, platform: str = ""):
-    """Get more information about an endpoint"""
-    endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.list(platform=platform or None))
-    for endpoint in endpoints:
-        click.echo(json.dumps(endpoint, indent=4))
-
-
-def do_endpoint_list(ctx: click.Context, platform: str):
-    params = dict(request_data=dict(filters=[]))
-    if platform:
-        params["request_data"]["filters"].append(
-            {"field": "platform", "operator": "in", "value": [platform]}
-        )
-    for obj in do_paginated_post_request(ctx, "endpoints/get_endpoint", params):
-        endpoints = obj["reply"]["endpoints"]
-        yield from endpoints
-
-
-@endpoint.command("get")
-@click.argument("hostname")
-@click.option("--field", "-f", help="Return only this field", type=str)
-@click.pass_context
-def endpoint_get(ctx: click.Context, hostname: str, field: str = None):
-    """Get more information about an endpoint"""
-    try:
-        endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.get_by_hostname(hostname))
-    except click.ClickException as exc:
-        if "No endpoint matched hostname" in str(exc):
-            click.echo("No match")
-            sys.exit(404)
-        raise
-    for endpoint in endpoints:
-        if field:
-            click.echo(endpoint.get(field, "N/A"))
-        else:
-            click.echo(json.dumps(endpoint, indent=4))
-
-
-def do_endpoint_get(ctx: click.Context, hostname: str):
-    # click.echo(hostname)
-    parameters = {
-        "request_data": {
-            "filters": [
-                {"field": "hostname", "operator": "in", "value": [hostname]},
-            ],
-        }
-    }
-    res = do_requests_post(ctx, "endpoints/get_endpoint", parameters)
-    obj = res.json()
-    if obj.get("reply", {}).get("total_count", 0) == 0:
-        click.echo("No match")
-        sys.exit(404)
-    return obj["reply"]["endpoints"]
-
-
-def do_get_triage_presets(ctx: click.Context):
-    params = dict(request_data={})
-    res = do_requests_post(ctx, "get_triage_presets", params)
-    obj = res.json()
-    return obj.get("reply", {}).get("triage_presets", [])
-
-
-def do_initiate_triage(ctx: click.Context, agent_ids: List[str], collector_uuid: str):
-    request_data = {"agent_ids": agent_ids}
-    if collector_uuid:
-        request_data["collector_uuid"] = collector_uuid
-    params = dict(request_data=request_data)
-    res = do_requests_post(ctx, "triage_endpoint", params)
-    obj = res.json()
-    return obj.get("reply", {})
-
-
-def do_action_status(ctx: click.Context, group_action_id: int):
-    params = dict(request_data=dict(group_action_id=group_action_id))
-    res = do_requests_post(ctx, "actions/get_action_status", params)
-    obj = res.json()
-    return obj.get("reply", {}).get("data", {})
-
-
-@triage.command("presets")
-@click.pass_context
-def triage_presets(ctx: click.Context):
-    presets = _run_with_xdr_client(ctx, lambda client: client.triage.presets())
-    for preset in presets:
-        click.echo(json.dumps(preset))
-
-
-@triage.command("new")
-@click.argument("hostname")
-@click.option(
-    "--collector-uuid",
-    "-c",
-    help="Triage configuration UUID (optional)",
-    type=str,
-    default="",
-)
-@click.pass_context
-def triage_new(ctx: click.Context, hostname: str, collector_uuid: str):
-    try:
-        reply = _run_with_xdr_client(
-            ctx,
-            lambda client: client.triage.start_by_hostname(hostname, collector_uuid=collector_uuid or None),
-        )
-    except click.ClickException as exc:
-        if "No matching agent IDs found" in str(exc):
-            click.echo("No matching agent IDs found for hostname")
-            sys.exit(4)
-        if "No endpoint matched hostname" in str(exc):
-            click.echo("No match")
-            sys.exit(404)
-        raise
-    click.echo(json.dumps(reply))
-
-
-@triage.command("status")
-@click.argument("group_action_id", type=int, nargs=-1)
-@click.pass_context
-def triage_status(ctx: click.Context, group_action_id: Tuple[int, ...]):
-    if not group_action_id:
-        click.echo("Provide one or more action IDs")
-        sys.exit(2)
-    payloads = _run_with_xdr_client(ctx, lambda client: client.triage.statuses(list(group_action_id)))
-    for payload in payloads:
-        click.echo(json.dumps(payload))
-
-
-@endpoint.command("who-has")
-@click.argument("ip")
-@click.option("--raw", is_flag=True, help="Display the whole endpoint object")
-@click.pass_context
-def endpoint_who_has(ctx: click.Context, ip: str, raw: bool = False):
-    """Resolve an IP address to a hostname"""
-    try:
-        endpoints = _run_with_xdr_client(ctx, lambda client: client.endpoints.who_has(ip))
-    except click.ClickException as exc:
-        if "No endpoint matched IP" in str(exc):
-            click.echo("No match")
-            sys.exit(404)
-        raise
-    if not endpoints:
-        click.echo("No match")
-        sys.exit(404)
-    for endpoint in endpoints:
-        if raw:
-            click.echo(json.dumps(endpoint, indent=4))
-        else:
-            click.echo(endpoint["endpoint_name"])
-
-
-@cli.group
-def config():
-    """Configure xdr-cli"""
-    pass
-
-
-@config.group
-def tenant():
-    """Add, update, or remove an XDR tenant"""
-    pass
-
-
-@tenant.command
-@click.argument("name")
-def add(name: str):
-    tenants = {}
-    if os.path.exists(AUTH_FILE):
-        tenants = json.load(open(AUTH_FILE))
-    else:
-        click.confirm(
-            f"Authentication file {AUTH_FILE} does not exist, should I create it?",
-            abort=True,
-        )
-    if name in tenants:
-        click.confirm(
-            f"This tenant {name} already exists, should I update it?", abort=True
-        )
-    base_url = click.prompt("Base URL (without https://)", type=str)
-    click.echo(
-        f"Create an Advanced API key manually on https://{base_url}/configuration/api-keys then:\n"
-    )
-    api_key_hash = click.prompt("API Key Hash", type=str)
-    api_key_id = click.prompt("API Key ID", type=int)
-    tenants[name] = dict(
-        api_key_id=api_key_id, api_key_hash=api_key_hash, base_url=base_url
-    )
-    json.dump(tenants, open(AUTH_FILE, "w"))
-
-
-@tenant.command("list")
-def list_tenants():
-    try:
-        tenants = json.load(open(AUTH_FILE))
-        for name in tenants:
-            click.echo(name)
-    except:
-        pass
-
-
-@tenant.command
-@click.argument("name")
-def remove(name: str):
-    tenants = json.load(open(AUTH_FILE))
-    del tenants[name]
-    json.dump(tenants, open(AUTH_FILE, "w"))
-
-
-@cli.group()
-def slack():
-    """Slack bot integration"""
-    pass
-
-
-@slack.command("serve")
-@click.option(
-    "--auth-file",
-    type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
-    default=pathlib.Path(AUTH_FILE),
-    show_default=True,
-    help="Path to xdr-cli tenant auth file",
-)
-@click.option(
-    "--signing-secret",
-    envvar="SLACK_SIGNING_SECRET",
-    default="",
-    help="Slack app signing secret (or set SLACK_SIGNING_SECRET)",
-)
-@click.option(
-    "--bot-token",
-    envvar="SLACK_BOT_TOKEN",
-    default="",
-    help="Slack bot token xoxb-... (or set SLACK_BOT_TOKEN)",
-)
-@click.option(
-    "--app-token",
-    envvar="SLACK_APP_TOKEN",
-    default="",
-    help="Slack app-level token xapp-... for Socket Mode (or set SLACK_APP_TOKEN)",
-)
-@click.option(
-    "--default-tenant",
-    envvar="XDR_SLACK_DEFAULT_TENANT",
-    default="",
-    help="Default tenant alias to use when a user omits --tenant",
-)
-@click.option(
-    "--timeout",
-    type=float,
-    default=30.0,
-    show_default=True,
-    help="XDR API timeout in seconds for Slack-triggered requests",
-)
-def slack_serve(
-    auth_file: pathlib.Path,
-    signing_secret: str,
-    bot_token: str,
-    app_token: str,
-    default_tenant: str,
-    timeout: float,
-):
-    """Run the Slack /xdr bot in Socket Mode."""
-    if not signing_secret:
-        raise click.ClickException("Missing Slack signing secret (--signing-secret or SLACK_SIGNING_SECRET)")
-    if not bot_token:
-        raise click.ClickException("Missing Slack bot token (--bot-token or SLACK_BOT_TOKEN)")
-    if not app_token:
-        raise click.ClickException("Missing Slack app token (--app-token or SLACK_APP_TOKEN)")
-
-    from .models import XdrClientOptions
-    from .slack import create_slack_app
-    from .slack.tenant_store import InMemoryTenantStore
-
-    try:
-        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-    except Exception as exc:  # pragma: no cover - optional dependency
-        raise click.ClickException(
-            "slack-bolt Socket Mode support is unavailable. Install xdr-cli[slack]."
-        ) from exc
-
-    tenants = _load_tenants_from_auth_file(str(auth_file))
-    if not tenants:
-        raise click.ClickException(f"No tenant profiles found in {auth_file}")
-    user_defaults = {"*": default_tenant} if default_tenant else {}
-    tenant_store = InMemoryTenantStore(tenants=tenants, user_defaults=user_defaults)
-    app = create_slack_app(
-        signing_secret=signing_secret,
-        bot_token=bot_token,
-        tenant_store=tenant_store,
-        client_options=XdrClientOptions(timeout_seconds=timeout),
-    )
-    async def _serve():
-        handler = AsyncSocketModeHandler(app, app_token)
-        logger.info("Starting Slack Socket Mode bot with %d tenant profile(s)", len(tenants))
-        await handler.start_async()
-
-    asyncio.run(_serve())
-
-
+# --------------------------------------------------------------------------- #
+# get-file (retrieve + extract)
+# --------------------------------------------------------------------------- #
 def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes):
     with zipfile.ZipFile(zip_path) as zf:
         for member in zf.infolist():
@@ -849,9 +588,7 @@ def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password
             if not name or name.endswith("/"):
                 continue
             destination = (output_dir / name).resolve()
-            if os.path.commonpath([str(output_dir.resolve()), str(destination)]) != str(
-                output_dir.resolve()
-            ):
+            if os.path.commonpath([str(output_dir.resolve()), str(destination)]) != str(output_dir.resolve()):
                 raise click.ClickException(f"Unsafe zip entry path: {name}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member, pwd=password) as src, open(destination, "wb") as dst:
@@ -935,106 +672,267 @@ def _extract_retrieved_file_zip(content: bytes, output_dir: pathlib.Path) -> Non
 @click.option("--endpoint-id", type=str, help="Endpoint ID")
 @click.option("--hostname", type=str, help="Endpoint hostname")
 @click.option(
-    "--output",
-    "-o",
+    "--output", "-o",
     type=click.Path(file_okay=False, dir_okay=True, path_type=pathlib.Path),
     required=True,
     help="Directory where endpoint files will be stored",
 )
 @click.argument("path", nargs=-1)
 @click.pass_context
-def get_file(
-    ctx: click.Context,
-    endpoint_id: str,
-    path: List[str],
-    output: pathlib.Path,
-    hostname,
-):
+def get_file(ctx: click.Context, endpoint_id: str, path: List[str], output: pathlib.Path, hostname):
     """Retrieve a file from an endpoint and extract the returned archives."""
-    content = _run_with_xdr_client(
+    content = _execute(
         ctx,
-        lambda client: client.files.retrieve(
-            endpoint_id=endpoint_id,
-            hostname=hostname,
-            paths=list(path),
-        ),
+        lambda client: client.files.retrieve(endpoint_id=endpoint_id, hostname=hostname, paths=list(path)),
     )
     _extract_retrieved_file_zip(content, output)
+    if _json_mode(ctx):
+        emit(ctx, {"output_dir": str(output), "paths": list(path)})
 
 
-def get_action_status(ctx: click.Context, action_id, endpoint_id) -> str:
-    # PENDING IN_PROGRESS CANCELLED PENDING_ABORT ABORTED EXPIRED
-    # COMPLETED_PARTIAL COMPLETED_SUCCESSFULLY FAILED TIMEOUT
-    params = dict(request_data=dict(group_action_id=action_id))
-    res = do_requests_post(ctx, "actions/get_action_status", params)
-    res = res.json()
-    return res.get("reply", {}).get("data", {}).get(endpoint_id, "")
-
-
-def retrieve_file(ctx: click.Context, output, action_id, endpoint_id):
-    params = {"request_data": {"group_action_id": action_id}}
-    res = do_requests_post(ctx, "actions/file_retrieval_details", params)
-    ret = res.json()
-    dl_url = ret.get("reply", {}).get("data", {}).get(endpoint_id)
-    res = requests.post(
-        dl_url,
-        headers=generate_auth_headers(ctx.obj["api_key_id"], ctx.obj["api_key_hash"]),
-    )
-    output.write(res.content)
-    output.close()
-
-
-def open_editor():
+# --------------------------------------------------------------------------- #
+# XQL
+# --------------------------------------------------------------------------- #
+def open_editor() -> str:
     # ripped from https://stackoverflow.com/a/19377899
     with tempfile.NamedTemporaryFile() as tmpfile:
         subprocess.call([os.environ.get("EDITOR", None) or "vim", tmpfile.name])
-
         with open(tmpfile.name, "r") as f:
             data = f.read()
     return data
 
 
 @cli.command
-@click.option(
-    "--begin-time", type=click.DateTime(), default=None, help="Begin of the timeframe"
-)
-@click.option(
-    "--end-time", type=click.DateTime(), default=None, help="End of the timeframe"
-)
+@click.option("--begin-time", type=click.DateTime(), default=None, help="Begin of the timeframe")
+@click.option("--end-time", type=click.DateTime(), default=None, help="End of the timeframe")
 @click.option("--output", type=click.Path(exists=False), default=None, help="Output")
 @click.option("--excel", is_flag=True, help="Format output as Excel file")
 @click.argument("xql_query", type=str, default="")
 @click.pass_context
-def xql(
-    ctx: click.Context,
-    xql_query: Optional[str],
-    begin_time: str = "",
-    end_time: str = "",
-    excel: bool = False,
-    output: str = "",
-):
-    """Execute an XQL query"""
+def xql(ctx: click.Context, xql_query: Optional[str], begin_time=None, end_time=None, excel: bool = False, output: str = ""):
+    """Execute an XQL query."""
     if excel and not output:
-        logger.error(
-            "You have selected Excel output but you did not specify a path where to write results (use --output!)"
-        )
-        sys.exit(3)
-
+        emit_error(ctx, "VALIDATION", "Excel output requires --output", EXIT_USAGE)
+        return
     if not xql_query:
+        if not sys.stdin.isatty():
+            emit_error(ctx, "VALIDATION", "No XQL query provided (an editor cannot be opened in a non-interactive session)", EXIT_USAGE)
+            return
         xql_query = open_editor()
-    results = _run_with_xdr_client(
+    results = _execute(
         ctx,
-        lambda client: client.xql.run(
-            query=xql_query,
-            begin_time=begin_time,
-            end_time=end_time,
-        ),
+        lambda client: client.xql.run(query=xql_query, begin_time=begin_time, end_time=end_time),
     )
     if excel:
         write_xql_results_excel(results, output)
+        if _json_mode(ctx):
+            emit(ctx, {"output": output, "rows": len(results)})
         return
-    for r in results:
-        click.echo(json.dumps(r))
+    _render_list(ctx, results)
+
+
+# --------------------------------------------------------------------------- #
+# Completion
+# --------------------------------------------------------------------------- #
+@cli.command("completion")
+@click.argument("shell", required=False)
+@click.pass_context
+def completion(ctx: click.Context, shell: Optional[str]):
+    if not shell:
+        shell = os.path.basename(os.environ.get("SHELL", "")).lower()
+    if shell not in ("bash", "zsh"):
+        click.echo("Shell must be bash or zsh (or set $SHELL accordingly)", err=True)
+        sys.exit(EXIT_USAGE)
+    prog_name = ctx.info_name or "xdr-cli"
+    complete_name = prog_name.replace("-", "_").replace(".", "_")
+    complete_var = f"_{complete_name}_COMPLETE".upper()
+    completion_cls = click.shell_completion.get_completion_class(shell)
+    comp = completion_cls(cli, {}, prog_name, complete_var)
+    click.echo(comp.source())
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+@cli.group
+def config():
+    """Configure xdr-cli."""
+    pass
+
+
+@config.group
+def tenant():
+    """Add, update, or remove an XDR tenant."""
+    pass
+
+
+@tenant.command
+@click.argument("name")
+@click.option("--base-url", default=None, help="Base URL (without https://)")
+@click.option("--api-key-hash", default=None, help="API Key Hash")
+@click.option("--api-key-id", default=None, type=int, help="API Key ID")
+@click.option("--yes", "-y", is_flag=True, help="Do not prompt for confirmation")
+def add(name: str, base_url, api_key_hash, api_key_id, yes):
+    """Add or update a tenant profile."""
+    tenants: Dict[str, dict] = {}
+    file_exists = os.path.exists(AUTH_FILE)
+    interactive = sys.stdin.isatty()
+    if file_exists:
+        tenants = _load_auth()
+    elif not (yes or interactive):
+        raise click.ClickException(f"Auth file {AUTH_FILE} does not exist (re-run with --yes to create it)")
+    elif not yes:
+        click.confirm(f"Authentication file {AUTH_FILE} does not exist, should I create it?", abort=True)
+
+    if name in tenants and not yes:
+        if not interactive:
+            raise click.ClickException(f"Tenant {name} exists (re-run with --yes to overwrite)")
+        click.confirm(f"This tenant {name} already exists, should I update it?", abort=True)
+
+    if base_url is None:
+        if not interactive:
+            raise click.ClickException("--base-url is required in a non-interactive session")
+        base_url = click.prompt("Base URL (without https://)", type=str)
+        click.echo(f"Create an Advanced API key manually on https://{base_url}/configuration/api-keys then:\n")
+    if api_key_hash is None:
+        if not interactive:
+            raise click.ClickException("--api-key-hash is required in a non-interactive session")
+        api_key_hash = click.prompt("API Key Hash", type=str)
+    if api_key_id is None:
+        if not interactive:
+            raise click.ClickException("--api-key-id is required in a non-interactive session")
+        api_key_id = click.prompt("API Key ID", type=int)
+
+    tenants[name] = dict(api_key_id=api_key_id, api_key_hash=api_key_hash, base_url=base_url)
+    _save_auth(tenants)
+
+
+@tenant.command("list")
+def list_tenants():
+    try:
+        tenants = _load_auth()
+    except FileNotFoundError:
+        return
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Failed to parse {AUTH_FILE}: {exc}")
+    for name in tenants:
+        click.echo(name)
+
+
+@tenant.command
+@click.argument("name")
+def remove(name: str):
+    tenants = _load_auth()
+    if name not in tenants:
+        raise click.ClickException(f"Tenant {name} does not exist")
+    del tenants[name]
+    _save_auth(tenants)
+
+
+def _load_tenants_from_auth_file(auth_file: str) -> Dict[str, XdrTenant]:
+    try:
+        raw = _load_auth(auth_file)
+    except FileNotFoundError:
+        raise click.ClickException(f"Auth file not found: {auth_file}")
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Failed to parse auth file {auth_file}: {exc}")
+
+    tenants: Dict[str, XdrTenant] = {}
+    for alias, cfg in raw.items():
+        try:
+            tenants[alias] = XdrTenant(
+                tenant_base_url=str(cfg["base_url"]),
+                credentials=XdrCredentials(
+                    api_key_id=str(cfg["api_key_id"]),
+                    api_key_hash=str(cfg["api_key_hash"]),
+                ),
+            )
+        except KeyError as exc:
+            raise click.ClickException(f"Tenant profile '{alias}' is missing required field: {exc}")
+    return tenants
+
+
+# --------------------------------------------------------------------------- #
+# Slack
+# --------------------------------------------------------------------------- #
+@cli.group()
+def slack():
+    """Slack bot integration."""
+    pass
+
+
+@slack.command("serve")
+@click.option("--auth-file", type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path), default=pathlib.Path(AUTH_FILE), show_default=True, help="Path to xdr-cli tenant auth file")
+@click.option("--signing-secret", envvar="SLACK_SIGNING_SECRET", default="", help="Slack app signing secret (or SLACK_SIGNING_SECRET)")
+@click.option("--bot-token", envvar="SLACK_BOT_TOKEN", default="", help="Slack bot token xoxb-... (or SLACK_BOT_TOKEN)")
+@click.option("--app-token", envvar="SLACK_APP_TOKEN", default="", help="Slack app-level token xapp-... for Socket Mode (or SLACK_APP_TOKEN)")
+@click.option("--default-tenant", envvar="XDR_SLACK_DEFAULT_TENANT", default="", help="Default tenant alias when a user omits --tenant")
+@click.option("--timeout", type=float, default=30.0, show_default=True, help="XDR API timeout in seconds")
+def slack_serve(auth_file, signing_secret, bot_token, app_token, default_tenant, timeout):
+    """Run the Slack /xdr bot in Socket Mode."""
+    if not signing_secret:
+        raise click.ClickException("Missing Slack signing secret (--signing-secret or SLACK_SIGNING_SECRET)")
+    if not bot_token:
+        raise click.ClickException("Missing Slack bot token (--bot-token or SLACK_BOT_TOKEN)")
+    if not app_token:
+        raise click.ClickException("Missing Slack app token (--app-token or SLACK_APP_TOKEN)")
+
+    from .slack import create_slack_app
+    from .slack.tenant_store import InMemoryTenantStore
+
+    try:
+        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise click.ClickException("slack-bolt Socket Mode support is unavailable. Install xdr-cli[slack].") from exc
+
+    tenants = _load_tenants_from_auth_file(str(auth_file))
+    if not tenants:
+        raise click.ClickException(f"No tenant profiles found in {auth_file}")
+    user_defaults = {"*": default_tenant} if default_tenant else {}
+    tenant_store = InMemoryTenantStore(tenants=tenants, user_defaults=user_defaults)
+    app = create_slack_app(
+        signing_secret=signing_secret,
+        bot_token=bot_token,
+        tenant_store=tenant_store,
+        client_options=XdrClientOptions(timeout_seconds=timeout),
+    )
+
+    async def _serve():
+        handler = AsyncSocketModeHandler(app, app_token)
+        logger.info("Starting Slack Socket Mode bot with %d tenant profile(s)", len(tenants))
+        await handler.start_async()
+
+    asyncio.run(_serve())
+
+
+# --------------------------------------------------------------------------- #
+# MCP
+# --------------------------------------------------------------------------- #
+@cli.group()
+def mcp():
+    """Model Context Protocol server."""
+    pass
+
+
+@mcp.command("serve")
+@click.option("--auth-file", type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path), default=pathlib.Path(AUTH_FILE), show_default=True, help="Path to xdr-cli tenant auth file")
+@click.option("--default-tenant", envvar="XDR_MCP_DEFAULT_TENANT", default="", help="Default tenant alias when a tool omits 'tenant'")
+@click.option("--read-only", is_flag=True, default=False, help="Refuse mutating tools (also via XDR_CLI_READONLY)")
+@click.option("--timeout", type=float, default=30.0, show_default=True, help="XDR API timeout in seconds")
+def mcp_serve(auth_file, default_tenant, read_only, timeout):
+    """Run the MCP server over stdio."""
+    from .mcp.server import run_stdio_server
+
+    tenants = _load_tenants_from_auth_file(str(auth_file))
+    if not tenants:
+        raise click.ClickException(f"No tenant profiles found in {auth_file}")
+    read_only = read_only or bool(os.environ.get("XDR_CLI_READONLY"))
+    options = XdrClientOptions(timeout_seconds=timeout, read_only=read_only)
+    run_stdio_server(
+        tenants=tenants,
+        default_tenant=default_tenant or None,
+        client_options=options,
+    )
 
 
 if __name__ == "__main__":

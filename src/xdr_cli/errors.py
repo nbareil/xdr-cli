@@ -36,3 +36,7 @@ class XdrNotFoundError(XdrError):
 
 class XdrOperationTimeoutError(XdrError):
     pass
+
+
+class XdrReadOnlyError(XdrError):
+    """Raised when a mutating operation is attempted in read-only mode."""
