@@ -175,3 +175,6 @@ cython_debug/
 /o
 /script_output.zip
 /.codex
+
+# nix build symlink
+/result
