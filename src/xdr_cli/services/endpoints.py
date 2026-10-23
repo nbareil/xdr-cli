@@ -3,21 +3,22 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..errors import XdrNotFoundError
+from ..models import ListPage
 from .base import BaseService
 
 
 class EndpointsService(BaseService):
-    async def list(self, platform: Optional[str] = None, limit: Optional[int] = None) -> List[Dict]:
+    async def list(
+        self, platform: Optional[str] = None, offset: int = 0, limit: Optional[int] = None
+    ) -> ListPage:
         params = {"request_data": {"filters": []}}
         if platform:
             params["request_data"]["filters"].append(
                 {"field": "platform", "operator": "in", "value": [platform]}
             )
-        pages = await self._paginated_post("endpoints/get_endpoint", params, limit=limit)
-        endpoints = []
-        for obj in pages:
-            endpoints.extend(obj.get("reply", {}).get("endpoints", []))
-        return endpoints[:limit] if limit is not None else endpoints
+        return await self._paginated_list(
+            "endpoints/get_endpoint", params, "endpoints", offset=offset, limit=limit
+        )
 
     async def get_by_hostname(self, hostname: str) -> List[Dict]:
         parameters = {

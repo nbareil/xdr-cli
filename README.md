@@ -68,10 +68,16 @@ predictable for scripts and AI agents:
   agent to be able to look but not touch.
 - `--dry-run` (on every mutating command) prints what *would* happen without calling the API.
 - `--fields a,b,c` and `--limit N` on the `list` commands keep output small and focused.
+- `--offset N` pages through `alert list`, `endpoint list` and `incident list`. With `--json`
+  the envelope carries a `meta` object (`offset`, `total_count`, `next_offset`); pass
+  `next_offset` back as `--offset` to fetch the next page. It is `null` on the last page.
+  Without `--json`, a `next page: --offset N` hint goes to stderr.
 
 ```
 $ xdr-cli --json --read-only endpoint list --platform linux --fields endpoint_name,ip --limit 5
-{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...]}
+{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...], "meta": {"offset": 0, "total_count": 42, "next_offset": 5}}
+
+$ xdr-cli --json alert list --offset 100 --limit 100
 
 $ xdr-cli --json endpoint isolate --hostname DESKTOP-V24D23 --dry-run
 {"ok": true, "data": {"dry_run": true, "action": "isolate", "endpoint_id": null, "hostname": "DESKTOP-V24D23"}}

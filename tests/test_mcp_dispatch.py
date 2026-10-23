@@ -1,7 +1,7 @@
 import pytest
 
 from xdr_cli.errors import XdrValidationError
-from xdr_cli.mcp.dispatch import TOOL_SPECS, _HANDLERS, XdrToolDispatcher
+from xdr_cli.mcp.dispatch import TOOL_SPECS, _HANDLERS, XdrToolDispatcher, _paging
 from xdr_cli.models import XdrCredentials, XdrTenant
 
 
@@ -54,3 +54,18 @@ def test_ambiguous_tenant_requires_selection():
 def test_single_tenant_auto_selected():
     d = XdrToolDispatcher({"only": TENANTS["demo"]})
     assert d._resolve_tenant(None).tenant_base_url == "demo.example.com"
+
+
+def test_list_tools_advertise_offset_and_limit():
+    for name in ("endpoint_list", "incident_list", "alert_list"):
+        spec = next(s for s in TOOL_SPECS if s.name == name)
+        assert {"offset", "limit"} <= set(spec.input_schema["properties"])
+
+
+def test_paging_args_validated():
+    assert _paging({}) == {"offset": 0, "limit": None}
+    assert _paging({"offset": 5, "limit": 10}) == {"offset": 5, "limit": 10}
+    with pytest.raises(XdrValidationError):
+        _paging({"offset": -1})
+    with pytest.raises(XdrValidationError):
+        _paging({"limit": 0})

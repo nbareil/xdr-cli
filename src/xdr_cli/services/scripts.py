@@ -185,7 +185,7 @@ class ScriptsService(BaseService):
         if all_platforms:
             endpoint_ids = []
             for platform in all_platforms:
-                endpoints = await self.client.endpoints.list(platform=platform)
+                endpoints = (await self.client.endpoints.list(platform=platform)).items
                 endpoint_ids.extend([e.get("endpoint_id") for e in endpoints if e.get("endpoint_id")])
         script_content = build_py_script_from_yara_bytes(yara_ruleset_bytes)
         actions = []

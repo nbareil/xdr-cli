@@ -1,8 +1,10 @@
 import json
 
+import click
 from click.testing import CliRunner
 
-from xdr_cli.xdr_cli import _parse_fields, _project, cli
+from xdr_cli.models import ListPage
+from xdr_cli.xdr_cli import _parse_fields, _project, _render_page, cli
 
 AUTH = ["--base-url", "x", "--api-key-id", "1", "--api-key-hash", "h"]
 
@@ -63,3 +65,36 @@ def test_xql_non_interactive_without_query_fails_fast():
     assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["error"]["code"] == "VALIDATION"
+
+
+def test_list_rejects_negative_offset():
+    result = CliRunner().invoke(cli, AUTH + ["alert", "list", "--offset", "-1"])
+    assert result.exit_code == 2
+
+
+def test_render_page_json_includes_paging_meta():
+    page = ListPage(items=[{"id": 1, "x": 2}], offset=10, total_count=50, next_offset=11)
+
+    @click.command()
+    @click.pass_context
+    def show(ctx):
+        ctx.obj = {"json": True}
+        _render_page(ctx, page, fields=["id"])
+
+    payload = json.loads(CliRunner().invoke(show).output)
+    assert payload["data"] == [{"id": 1}]
+    assert payload["meta"] == {"offset": 10, "total_count": 50, "next_offset": 11}
+
+
+def test_render_page_text_hints_next_offset_on_stderr():
+    page = ListPage(items=[{"id": 1}], offset=0, total_count=5, next_offset=1)
+
+    @click.command()
+    @click.pass_context
+    def show(ctx):
+        ctx.obj = {}
+        _render_page(ctx, page)
+
+    result = CliRunner(mix_stderr=False).invoke(show)
+    assert json.loads(result.stdout) == {"id": 1}
+    assert "--offset 1" in result.stderr

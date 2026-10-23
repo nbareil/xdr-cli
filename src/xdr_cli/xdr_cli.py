@@ -16,7 +16,7 @@ import click
 
 from .client import XdrClient
 from .errors import XdrError
-from .models import XdrClientOptions, XdrCredentials, XdrTenant
+from .models import ListPage, XdrClientOptions, XdrCredentials, XdrTenant
 from .output.envelope import (
     EXIT_NOT_FOUND,
     EXIT_USAGE,
@@ -132,6 +132,21 @@ def _render_list(ctx: click.Context, items: List[Dict], fields: Optional[List[st
         click.echo(json.dumps(item, indent=indent))
 
 
+def _render_page(ctx: click.Context, page: ListPage, fields: Optional[List[str]] = None, indent: Optional[int] = None) -> None:
+    projected = [_project(i, fields) for i in page.items] if fields else page.items
+    if _json_mode(ctx):
+        meta = {"offset": page.offset, "total_count": page.total_count, "next_offset": page.next_offset}
+        emit(ctx, projected, meta=meta)
+        return
+    for item in projected:
+        click.echo(json.dumps(item, indent=indent))
+    if page.next_offset is not None:
+        click.echo(
+            "Showing %d of %d; next page: --offset %d" % (len(page.items), page.total_count, page.next_offset),
+            err=True,
+        )
+
+
 def _render_obj(ctx: click.Context, obj: Any, indent: Optional[int] = None) -> None:
     if _json_mode(ctx):
         emit(ctx, obj)
@@ -210,11 +225,12 @@ def incident(ctx):
 
 @incident.command("list")
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--limit", "-l", help="Stop after N incidents", type=int, default=None)
+@click.option("--offset", "-o", help="Skip the first N incidents", type=click.IntRange(min=0), default=0)
+@click.option("--limit", "-l", help="Stop after N incidents", type=click.IntRange(min=1), default=None)
 @click.pass_context
-def list_incidents(ctx: click.Context, fields: Optional[str], limit: Optional[int]):
-    incidents = _execute(ctx, lambda client: client.incidents.list(limit=limit))
-    _render_list(ctx, incidents, fields=_parse_fields(fields))
+def list_incidents(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int]):
+    page = _execute(ctx, lambda client: client.incidents.list(offset=offset, limit=limit))
+    _render_page(ctx, page, fields=_parse_fields(fields))
 
 
 @incident.command("get")
@@ -248,11 +264,12 @@ def alert(ctx):
 
 @alert.command("list")
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--limit", "-l", help="Stop after N alerts", type=int, default=None)
+@click.option("--offset", "-o", help="Skip the first N alerts", type=click.IntRange(min=0), default=0)
+@click.option("--limit", "-l", help="Stop after N alerts", type=click.IntRange(min=1), default=None)
 @click.pass_context
-def list_alerts(ctx: click.Context, fields: Optional[str], limit: Optional[int]):
-    alerts = _execute(ctx, lambda client: client.alerts.list(limit=limit))
-    _render_list(ctx, alerts, fields=_parse_fields(fields))
+def list_alerts(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int]):
+    page = _execute(ctx, lambda client: client.alerts.list(offset=offset, limit=limit))
+    _render_page(ctx, page, fields=_parse_fields(fields))
 
 
 @alert.command("close")
@@ -279,12 +296,13 @@ def endpoint(ctx: click.Context):
 @endpoint.command("list")
 @click.option("--platform", "-p", help="Filter by platform: linux, windows, macos, android", type=str)
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--limit", "-l", help="Stop after N endpoints", type=int, default=None)
+@click.option("--offset", "-o", help="Skip the first N endpoints", type=click.IntRange(min=0), default=0)
+@click.option("--limit", "-l", help="Stop after N endpoints", type=click.IntRange(min=1), default=None)
 @click.pass_context
-def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, limit: Optional[int] = None):
+def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, offset: int = 0, limit: Optional[int] = None):
     """List endpoints, optionally filtered by platform."""
-    endpoints = _execute(ctx, lambda client: client.endpoints.list(platform=platform or None, limit=limit))
-    _render_list(ctx, endpoints, fields=_parse_fields(fields), indent=4)
+    page = _execute(ctx, lambda client: client.endpoints.list(platform=platform or None, offset=offset, limit=limit))
+    _render_page(ctx, page, fields=_parse_fields(fields), indent=4)
 
 
 @endpoint.command("get")

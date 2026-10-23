@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..client import XdrClient
 from ..errors import XdrValidationError
-from ..models import XdrClientOptions, XdrTenant
+from ..models import ListPage, XdrClientOptions, XdrTenant
 
 
 @dataclass
@@ -28,21 +28,25 @@ def _obj(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Di
 
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
+_PAGING_DOC = (
+    " Returns {items, offset, total_count, next_offset}; pass next_offset as"
+    " 'offset' to fetch the next page (null when there are no more rows)."
+)
 
 
 TOOL_SPECS: List[ToolSpec] = [
-    ToolSpec("endpoint_list", "List endpoints, optionally filtered by platform.",
-             _obj({"platform": _STR, "limit": _INT})),
+    ToolSpec("endpoint_list", "List endpoints, optionally filtered by platform." + _PAGING_DOC,
+             _obj({"platform": _STR, "offset": _INT, "limit": _INT})),
     ToolSpec("endpoint_get", "Get endpoint details by hostname.",
              _obj({"hostname": _STR, "field": _STR}, required=["hostname"])),
     ToolSpec("endpoint_who_has", "Resolve an IP address to endpoint(s).",
              _obj({"ip": _STR}, required=["ip"])),
-    ToolSpec("incident_list", "List incidents.", _obj({"limit": _INT})),
+    ToolSpec("incident_list", "List incidents." + _PAGING_DOC, _obj({"offset": _INT, "limit": _INT})),
     ToolSpec("incident_get", "Get extra data for an incident.",
              _obj({"incident_id": _STR}, required=["incident_id"])),
     ToolSpec("incident_close", "Close (resolve) an incident.",
              _obj({"incident_id": _STR}, required=["incident_id"]), mutating=True),
-    ToolSpec("alert_list", "List alerts.", _obj({"limit": _INT})),
+    ToolSpec("alert_list", "List alerts." + _PAGING_DOC, _obj({"offset": _INT, "limit": _INT})),
     ToolSpec("alert_close", "Close (resolve) one or more alerts.",
              _obj({"alert_ids": {"type": "array", "items": _INT}}, required=["alert_ids"]), mutating=True),
     ToolSpec("triage_presets", "List triage presets.", _obj({})),
@@ -107,16 +111,30 @@ def _require(args: Dict[str, Any], key: str) -> Any:
     return args[key]
 
 
+def _paging(args: Dict[str, Any]) -> Dict[str, Any]:
+    offset = int(args.get("offset") or 0)
+    limit = args.get("limit")
+    if offset < 0:
+        raise XdrValidationError("offset must be >= 0")
+    if limit is not None and int(limit) < 1:
+        raise XdrValidationError("limit must be >= 1")
+    return {"offset": offset, "limit": int(limit) if limit is not None else None}
+
+
+async def _page(coro: Awaitable[ListPage]) -> Dict[str, Any]:
+    return asdict(await coro)
+
+
 Handler = Callable[[XdrClient, Dict[str, Any]], Awaitable[Any]]
 
 _HANDLERS: Dict[str, Handler] = {
-    "endpoint_list": lambda c, a: c.endpoints.list(platform=a.get("platform"), limit=a.get("limit")),
+    "endpoint_list": lambda c, a: _page(c.endpoints.list(platform=a.get("platform"), **_paging(a))),
     "endpoint_get": lambda c, a: c.endpoints.get_by_hostname(_require(a, "hostname")),
     "endpoint_who_has": lambda c, a: c.endpoints.who_has(_require(a, "ip")),
-    "incident_list": lambda c, a: c.incidents.list(limit=a.get("limit")),
+    "incident_list": lambda c, a: _page(c.incidents.list(**_paging(a))),
     "incident_get": lambda c, a: c.incidents.get(_require(a, "incident_id")),
     "incident_close": lambda c, a: c.incidents.close(_require(a, "incident_id")),
-    "alert_list": lambda c, a: c.alerts.list(limit=a.get("limit")),
+    "alert_list": lambda c, a: _page(c.alerts.list(**_paging(a))),
     "alert_close": lambda c, a: c.alerts.close([int(x) for x in _require(a, "alert_ids")]),
     "triage_presets": lambda c, a: c.triage.presets(),
     "triage_new": lambda c, a: c.triage.start_by_hostname(_require(a, "hostname"), collector_uuid=a.get("collector_uuid")),

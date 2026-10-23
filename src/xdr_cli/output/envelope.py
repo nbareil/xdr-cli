@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Dict, Optional
 
 import click
 
@@ -49,14 +49,17 @@ def _json_enabled(ctx: click.Context) -> bool:
     return bool((ctx.obj or {}).get("json"))
 
 
-def emit(ctx: click.Context, data: Any) -> None:
+def emit(ctx: click.Context, data: Any, meta: Optional[Dict[str, Any]] = None) -> None:
     """Print a successful result.
 
     With ``--json`` the data is wrapped in a ``{"ok": true, "data": ...}``
-    envelope on a single line. Without it, callers should print their own
+    envelope on a single line, plus a ``meta`` object when given. Without it, callers should print their own
     legacy output and not call this (see :func:`emit_default`).
     """
-    click.echo(json.dumps({"ok": True, "data": data}))
+    envelope: Dict[str, Any] = {"ok": True, "data": data}
+    if meta is not None:
+        envelope["meta"] = meta
+    click.echo(json.dumps(envelope))
 
 
 def emit_error(ctx: click.Context, code: str, message: str, exit_code: int = EXIT_ERROR) -> None:

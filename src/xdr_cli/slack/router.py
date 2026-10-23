@@ -96,7 +96,7 @@ class SlackXdrDispatcher:
         if cmd.group == "endpoint" and cmd.action == "list":
             platform = cmd.options.get("platform")
             logger.debug("Calling endpoints.list platform=%r", platform)
-            items = await client.endpoints.list(platform=platform)
+            items = (await client.endpoints.list(platform=platform)).items
             title = "Endpoints"
             if platform:
                 title = f"Endpoints (platform={platform})"
@@ -121,7 +121,7 @@ class SlackXdrDispatcher:
                 return [{field: item.get(field, "N/A")} for item in items]
             return format_endpoints_compact(items, title=f"Endpoints for IP {ip}")
         if cmd.group == "incident" and cmd.action == "list":
-            items = await client.incidents.list()
+            items = (await client.incidents.list()).items
             return {"summary": format_list_summary(items, "incidents"), "items": items}
         if cmd.group == "incident" and cmd.action == "get":
             if not cmd.positional:
@@ -132,7 +132,7 @@ class SlackXdrDispatcher:
                 raise XdrValidationError("incident close requires INCIDENT_ID")
             return await client.incidents.close(cmd.positional[0])
         if cmd.group == "alert" and cmd.action == "list":
-            items = await client.alerts.list()
+            items = (await client.alerts.list()).items
             return {"summary": format_list_summary(items, "alerts"), "items": items}
         if cmd.group == "alert" and cmd.action == "close":
             if not cmd.positional:

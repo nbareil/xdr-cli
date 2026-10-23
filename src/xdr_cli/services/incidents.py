@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from ..models import ListPage
 from .base import BaseService
 
 
 class IncidentsService(BaseService):
-    async def list(self, limit: Optional[int] = None) -> List[Dict]:
-        pages = await self._paginated_post("incidents/get_incidents", {"request_data": {}}, limit=limit)
-        items = []
-        for obj in pages:
-            items.extend(obj.get("reply", {}).get("incidents", []))
-        return items[:limit] if limit is not None else items
+    async def list(self, offset: int = 0, limit: Optional[int] = None) -> ListPage:
+        return await self._paginated_list(
+            "incidents/get_incidents", {"request_data": {}}, "incidents", offset=offset, limit=limit
+        )
 
     async def get(self, incident_id: str) -> Dict:
         params = {"request_data": {"incident_id": incident_id}}
