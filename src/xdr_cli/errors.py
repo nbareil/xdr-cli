@@ -18,6 +18,9 @@ class XdrTransportError(XdrError):
 
 
 class XdrApiError(XdrError):
+    # Seconds from a Retry-After header, when the server sent one.
+    retry_after: Optional[float] = None
+
     def __init__(self, endpoint: str, status_code: int, reason: str, response_text: str):
         self.endpoint = endpoint
         self.status_code = status_code

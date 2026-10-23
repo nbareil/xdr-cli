@@ -20,13 +20,17 @@ class XdrClientOptions:
     user_agent: str = "xdr-cli-library/0.1"
     verify_ssl: bool = True
     read_only: bool = False
+    # Retries for idempotent reads (post_json(..., retry=True)) only.
+    max_retries: int = 4
+    retry_backoff_seconds: float = 1.0
+    retry_max_backoff_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
 class ListPage:
     items: List[Dict[str, Any]]
-    offset: int
     total_count: int
-    next_offset: Optional[int]
+    # Opaque token to resume right after these items; None when complete.
+    next_cursor: Optional[str]
     sort_field: str
     sort_order: str

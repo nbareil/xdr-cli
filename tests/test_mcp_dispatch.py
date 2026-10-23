@@ -60,16 +60,14 @@ def test_list_tools_advertise_offset_and_limit():
     for name in ("endpoint_list", "incident_list", "alert_list"):
         spec = next(s for s in TOOL_SPECS if s.name == name)
         props = spec.input_schema["properties"]
-        assert {"offset", "limit", "sort_field", "sort_order"} <= set(props)
+        assert {"offset", "cursor", "limit", "sort_field", "sort_order"} <= set(props)
         assert props["sort_order"]["enum"] == ["asc", "desc"]
 
 
-def test_paging_args_validated():
-    assert _paging({}) == {"offset": 0, "limit": None, "sort_field": None, "sort_order": None}
-    assert _paging({"offset": 5, "limit": 10, "sort_field": "severity", "sort_order": "asc"}) == {
-        "offset": 5, "limit": 10, "sort_field": "severity", "sort_order": "asc",
+def test_paging_args_normalised():
+    assert _paging({}) == {
+        "offset": 0, "cursor": None, "limit": None, "sort_field": None, "sort_order": None,
     }
-    with pytest.raises(XdrValidationError):
-        _paging({"offset": -1})
-    with pytest.raises(XdrValidationError):
-        _paging({"limit": 0})
+    assert _paging({"cursor": "abc", "limit": "10"}) == {
+        "offset": 0, "cursor": "abc", "limit": 10, "sort_field": None, "sort_order": None,
+    }

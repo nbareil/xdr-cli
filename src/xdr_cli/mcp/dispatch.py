@@ -32,15 +32,17 @@ def _obj(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Di
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 _PAGING_DOC = (
-    " Returns {items, offset, total_count, next_offset, sort_field, sort_order};"
-    " pass next_offset as 'offset' (with the same sort) to fetch the next page"
-    " (null when there are no more rows)."
+    " Returns {items, total_count, next_cursor, sort_field, sort_order}; pass"
+    " next_cursor back as 'cursor' (alone, without offset or sort) to fetch the"
+    " next page. next_cursor is null when there are no more rows. Use 'limit'"
+    " on large tenants."
 )
 
 
 def _paging_props(service_cls) -> Dict[str, Any]:
     return {
         "offset": _INT,
+        "cursor": {"type": "string", "description": "next_cursor from a previous call"},
         "limit": _INT,
         "sort_field": {"type": "string", "enum": list(service_cls.SORT_FIELDS),
                        "description": "Default: %s" % service_cls.SORT_FIELDS[0]},
@@ -127,14 +129,10 @@ def _require(args: Dict[str, Any], key: str) -> Any:
 
 
 def _paging(args: Dict[str, Any]) -> Dict[str, Any]:
-    offset = int(args.get("offset") or 0)
     limit = args.get("limit")
-    if offset < 0:
-        raise XdrValidationError("offset must be >= 0")
-    if limit is not None and int(limit) < 1:
-        raise XdrValidationError("limit must be >= 1")
     return {
-        "offset": offset,
+        "offset": int(args.get("offset") or 0),
+        "cursor": args.get("cursor"),
         "limit": int(limit) if limit is not None else None,
         "sort_field": args.get("sort_field"),
         "sort_order": args.get("sort_order"),

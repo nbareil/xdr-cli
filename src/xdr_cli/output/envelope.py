@@ -62,10 +62,22 @@ def emit(ctx: click.Context, data: Any, meta: Optional[Dict[str, Any]] = None) -
     click.echo(json.dumps(envelope))
 
 
-def emit_error(ctx: click.Context, code: str, message: str, exit_code: int = EXIT_ERROR) -> None:
-    """Print a structured error and exit with ``exit_code``."""
+def emit_error(
+    ctx: click.Context,
+    code: str,
+    message: str,
+    exit_code: int = EXIT_ERROR,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Print a structured error and exit with ``exit_code``.
+
+    ``extra`` adds top-level keys to the JSON envelope, e.g. the partial
+    ``data`` and resume ``meta`` of an interrupted listing.
+    """
     if _json_enabled(ctx):
-        click.echo(json.dumps({"ok": False, "error": {"code": code, "message": message}}))
+        envelope: Dict[str, Any] = {"ok": False, "error": {"code": code, "message": message}}
+        envelope.update(extra or {})
+        click.echo(json.dumps(envelope))
     else:
         click.echo(message, err=True)
     raise SystemExit(exit_code)

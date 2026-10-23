@@ -61,29 +61,37 @@ predictable for scripts and AI agents:
 
 - `--json` wraps every command's output in a stable envelope: `{"ok": true, "data": ...}`
   on success, or `{"ok": false, "error": {"code": ..., "message": ...}}` on failure. The
-  process exit code is also stable: `0` success, `2` usage/validation error, `4` not found,
-  `1` other errors.
+  process exit code is also stable: `0` success, `2` usage/validation error, `3` partial
+  result (an interrupted listing), `4` not found, `1` other errors.
 - `--read-only` (or the `XDR_CLI_READONLY` environment variable) refuses every mutating
   operation (close, isolate, scan, quarantine, script run, triage). Useful when you want an
   agent to be able to look but not touch.
 - `--dry-run` (on every mutating command) prints what *would* happen without calling the API.
 - `--fields a,b,c` and `--limit N` on the `list` commands keep output small and focused.
-- `--offset N` pages through `alert list`, `endpoint list` and `incident list`. With `--json`
-  the envelope carries a `meta` object (`offset`, `total_count`, `next_offset`); pass
-  `next_offset` back as `--offset` to fetch the next page. It is `null` on the last page.
-  Without `--json`, a `next page: --offset N` hint goes to stderr.
-- Results are always explicitly sorted, so the same offset returns the same rows. Use
-  `--sort FIELD` and `--order asc|desc` to change it, and keep them the same while paging.
-  Defaults: alerts `creation_time` desc, incidents `incident_id` desc, endpoints
-  `endpoint_id` asc. Only fields the API sorts correctly are offered: alerts
-  `creation_time`, `severity`; incidents `incident_id`, `creation_time`,
-  `modification_time`; endpoints `endpoint_id`, `first_seen`.
+- `alert list`, `endpoint list` and `incident list` fetch every page by default, retrying
+  timeouts, rate limits (429) and transient 5xx errors with backoff. Without `--json`, rows
+  print as each page arrives, so a long listing uses little memory.
+- `--limit N` stops after N rows, and the response includes a cursor for the rest. With
+  `--json`, `meta` holds `count`, `total_count`, `next_cursor` and `sort`. Pass `next_cursor`
+  back alone as `--cursor` to continue. It is `null` once the listing is complete. Without
+  `--json`, a `next page: --cursor ...` hint goes to stderr.
+- If a page still fails after retries, the rows fetched so far are kept and the command exits
+  with code `3`. The error message carries the cursor to resume from. With `--json`, the
+  error envelope also includes the partial `data` and `meta.next_cursor`.
+- `--offset N` skips the first N rows. Prefer `--cursor` to continue a listing: XDR rejects
+  deep offsets (roughly past 10,000 rows), while cursors don't have that limit.
+- Results are always explicitly sorted, so a cursor resumes exactly where it stopped. Use
+  `--sort FIELD` and `--order asc|desc` to change it. Defaults: alerts `creation_time` desc,
+  incidents `creation_time` desc, endpoints `first_seen` asc. These time fields let the CLI
+  page with a "since the last row" filter instead of a growing offset, so very large
+  listings work. Other options (alerts `severity`, incidents `incident_id`, endpoints
+  `endpoint_id`) page by offset and hit the deep-offset limit on large tenants.
 
 ```
 $ xdr-cli --json --read-only endpoint list --platform linux --fields endpoint_name,ip --limit 5
-{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...], "meta": {"offset": 0, "total_count": 42, "next_offset": 5, "sort": {"field": "endpoint_id", "order": "asc"}}}
+{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...], "meta": {"count": 5, "total_count": 42, "next_cursor": "eyJmIjoiZmlyc3Rf...", "sort": {"field": "first_seen", "order": "asc"}}}
 
-$ xdr-cli --json alert list --offset 100 --limit 100
+$ xdr-cli --json endpoint list --platform linux --fields endpoint_name,ip --limit 5 --cursor eyJmIjoiZmlyc3Rf...
 
 $ xdr-cli --json endpoint isolate --hostname DESKTOP-V24D23 --dry-run
 {"ok": true, "data": {"dry_run": true, "action": "isolate", "endpoint_id": null, "hostname": "DESKTOP-V24D23"}}

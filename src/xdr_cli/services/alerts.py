@@ -1,32 +1,18 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from ..models import ListPage
-from .base import BaseService
+from .base import ListableService
 
 
-class AlertsService(BaseService):
-    # get_alerts rejects alert_id/detection_timestamp; creation_time is the
-    # closest to a unique key (severity has many ties).
+class AlertsService(ListableService):
+    LIST_URI = "alerts/get_alerts"
+    LIST_KEY = "alerts"
+    # get_alerts rejects alert_id/detection_timestamp as sort fields.
+    # Rows don't carry creation_time, but detection_timestamp matches it
+    # (checked against a live tenant), which is what keyset paging needs.
     SORT_FIELDS = ("creation_time", "severity")
-
-    async def list(
-        self,
-        offset: int = 0,
-        limit: Optional[int] = None,
-        sort_field: Optional[str] = None,
-        sort_order: Optional[str] = None,
-    ) -> ListPage:
-        return await self._paginated_list(
-            "alerts/get_alerts",
-            {"request_data": {}},
-            "alerts",
-            offset=offset,
-            limit=limit,
-            sort_field=sort_field,
-            sort_order=sort_order,
-        )
+    KEYSET_FIELDS = {"creation_time": "detection_timestamp"}
 
     async def close(self, alert_ids: List[int]) -> Dict:
         self._ensure_writable("alert close")

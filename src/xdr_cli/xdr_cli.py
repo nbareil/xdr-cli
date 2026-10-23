@@ -16,9 +16,10 @@ import click
 
 from .client import XdrClient
 from .errors import XdrError
-from .models import ListPage, XdrClientOptions, XdrCredentials, XdrTenant
+from .models import XdrClientOptions, XdrCredentials, XdrTenant
 from .output.envelope import (
     EXIT_NOT_FOUND,
+    EXIT_PARTIAL,
     EXIT_USAGE,
     emit,
     emit_error,
@@ -135,43 +136,85 @@ def _render_list(ctx: click.Context, items: List[Dict], fields: Optional[List[st
         click.echo(json.dumps(item, indent=indent))
 
 
-def _sort_options(service_cls) -> Callable:
-    """--sort/--order options listing the fields the service can sort by."""
-
-    def decorator(f: Callable) -> Callable:
-        f = click.option(
-            "--order",
-            type=click.Choice(["asc", "desc"]),
-            default=None,
-            help="Sort order (default: %s)" % service_cls.DEFAULT_SORT_ORDER,
-        )(f)
-        return click.option(
+def _list_options(service_cls, noun: str) -> Callable:
+    """Shared paging/sorting options for the paginated list commands."""
+    options = [
+        click.option("--fields", "-f", help="Comma-separated keys to keep", type=str),
+        click.option("--limit", "-l", help="Stop after N %s" % noun, type=click.IntRange(min=1), default=None),
+        click.option("--offset", "-o", help="Skip the first N %s" % noun, type=click.IntRange(min=0), default=0),
+        click.option("--cursor", "-c", help="Resume a listing from a previous next_cursor", type=str, default=None),
+        click.option(
             "--sort",
             "sort_field",
             type=click.Choice(list(service_cls.SORT_FIELDS)),
             default=None,
             help="Sort field (default: %s)" % service_cls.SORT_FIELDS[0],
-        )(f)
+        ),
+        click.option(
+            "--order",
+            "sort_order",
+            type=click.Choice(["asc", "desc"]),
+            default=None,
+            help="Sort order (default: %s)" % service_cls.DEFAULT_SORT_ORDER,
+        ),
+    ]
+
+    def decorator(f: Callable) -> Callable:
+        for option in reversed(options):
+            f = option(f)
+        return f
 
     return decorator
 
 
-def _render_page(ctx: click.Context, page: ListPage, fields: Optional[List[str]] = None, indent: Optional[int] = None) -> None:
-    projected = [_project(i, fields) for i in page.items] if fields else page.items
-    if _json_mode(ctx):
-        meta = {
-            "offset": page.offset,
-            "total_count": page.total_count,
-            "next_offset": page.next_offset,
-            "sort": {"field": page.sort_field, "order": page.sort_order},
-        }
-        emit(ctx, projected, meta=meta)
+def _stream_list(ctx: click.Context, service_name: str, fields: Optional[str], indent: Optional[int] = None, **kwargs: Any) -> None:
+    """Run a paginated listing, printing each page as it arrives.
+
+    Text mode prints rows as soon as their page lands, so memory stays flat
+    and output survives a failure. ``--json`` buffers into one envelope. If a
+    page fails after others succeeded, the rows so far are kept, the cursor
+    to resume from is reported, and the exit code is EXIT_PARTIAL.
+    """
+    keep = _parse_fields(fields)
+    json_mode = _json_mode(ctx)
+    state: Dict[str, Any] = {"items": [], "count": 0, "page": None}
+
+    async def op(client: XdrClient):
+        try:
+            async for page in getattr(client, service_name).iter_pages(**kwargs):
+                rows = [_project(i, keep) for i in page.items] if keep else page.items
+                if json_mode:
+                    state["items"].extend(rows)
+                else:
+                    for row in rows:
+                        click.echo(json.dumps(row, indent=indent))
+                state["count"] += len(rows)
+                state["page"] = page
+        except XdrError as exc:
+            if state["page"] is None:
+                raise
+            return exc
+        return None
+
+    failure = _execute(ctx, op)
+    page = state["page"]
+    meta = {
+        "count": state["count"],
+        "total_count": page.total_count,
+        "next_cursor": page.next_cursor,
+        "sort": {"field": page.sort_field, "order": page.sort_order},
+    }
+    if failure is not None:
+        message = "Listing stopped after %d rows: %s. Resume with --cursor %s" % (
+            state["count"], failure, page.next_cursor)
+        extra = {"data": state["items"], "meta": meta} if json_mode else None
+        emit_error(ctx, error_code_for(failure), message, EXIT_PARTIAL, extra=extra)
+    if json_mode:
+        emit(ctx, state["items"], meta=meta)
         return
-    for item in projected:
-        click.echo(json.dumps(item, indent=indent))
-    if page.next_offset is not None:
+    if page.next_cursor is not None:
         click.echo(
-            "Showing %d of %d; next page: --offset %d" % (len(page.items), page.total_count, page.next_offset),
+            "Showing %d of %d; next page: --cursor %s" % (state["count"], page.total_count, page.next_cursor),
             err=True,
         )
 
@@ -253,17 +296,10 @@ def incident(ctx):
 
 
 @incident.command("list")
-@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--offset", "-o", help="Skip the first N incidents", type=click.IntRange(min=0), default=0)
-@click.option("--limit", "-l", help="Stop after N incidents", type=click.IntRange(min=1), default=None)
-@_sort_options(IncidentsService)
+@_list_options(IncidentsService, "incidents")
 @click.pass_context
-def list_incidents(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int], sort_field: Optional[str], order: Optional[str]):
-    page = _execute(
-        ctx,
-        lambda client: client.incidents.list(offset=offset, limit=limit, sort_field=sort_field, sort_order=order),
-    )
-    _render_page(ctx, page, fields=_parse_fields(fields))
+def list_incidents(ctx: click.Context, fields: Optional[str], **kwargs: Any):
+    _stream_list(ctx, "incidents", fields, **kwargs)
 
 
 @incident.command("get")
@@ -296,17 +332,10 @@ def alert(ctx):
 
 
 @alert.command("list")
-@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--offset", "-o", help="Skip the first N alerts", type=click.IntRange(min=0), default=0)
-@click.option("--limit", "-l", help="Stop after N alerts", type=click.IntRange(min=1), default=None)
-@_sort_options(AlertsService)
+@_list_options(AlertsService, "alerts")
 @click.pass_context
-def list_alerts(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int], sort_field: Optional[str], order: Optional[str]):
-    page = _execute(
-        ctx,
-        lambda client: client.alerts.list(offset=offset, limit=limit, sort_field=sort_field, sort_order=order),
-    )
-    _render_page(ctx, page, fields=_parse_fields(fields))
+def list_alerts(ctx: click.Context, fields: Optional[str], **kwargs: Any):
+    _stream_list(ctx, "alerts", fields, **kwargs)
 
 
 @alert.command("close")
@@ -332,20 +361,11 @@ def endpoint(ctx: click.Context):
 
 @endpoint.command("list")
 @click.option("--platform", "-p", help="Filter by platform: linux, windows, macos, android", type=str)
-@click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
-@click.option("--offset", "-o", help="Skip the first N endpoints", type=click.IntRange(min=0), default=0)
-@click.option("--limit", "-l", help="Stop after N endpoints", type=click.IntRange(min=1), default=None)
-@_sort_options(EndpointsService)
+@_list_options(EndpointsService, "endpoints")
 @click.pass_context
-def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, offset: int = 0, limit: Optional[int] = None, sort_field: Optional[str] = None, order: Optional[str] = None):
+def endpoint_list(ctx: click.Context, fields: Optional[str], platform: Optional[str], **kwargs: Any):
     """List endpoints, optionally filtered by platform."""
-    page = _execute(
-        ctx,
-        lambda client: client.endpoints.list(
-            platform=platform or None, offset=offset, limit=limit, sort_field=sort_field, sort_order=order
-        ),
-    )
-    _render_page(ctx, page, fields=_parse_fields(fields), indent=4)
+    _stream_list(ctx, "endpoints", fields, indent=4, platform=platform or None, **kwargs)
 
 
 @endpoint.command("get")

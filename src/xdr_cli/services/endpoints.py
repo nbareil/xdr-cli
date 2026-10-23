@@ -3,38 +3,24 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..errors import XdrNotFoundError
-from ..models import ListPage
-from .base import BaseService
+from .base import ListableService
 
 
-class EndpointsService(BaseService):
-    # last_seen is accepted by get_endpoint but does not actually order the
-    # results, and endpoint_name is rejected, so neither is offered.
-    SORT_FIELDS = ("endpoint_id", "first_seen")
+class EndpointsService(ListableService):
+    LIST_URI = "endpoints/get_endpoint"
+    LIST_KEY = "endpoints"
+    # first_seen (asc) is the default: it supports keyset paging and new
+    # enrolments land at the end, so earlier pages don't shift. last_seen is
+    # accepted by get_endpoint but does not actually order the results, and
+    # endpoint_name is rejected, so neither is offered.
+    SORT_FIELDS = ("first_seen", "endpoint_id")
     DEFAULT_SORT_ORDER = "asc"
+    KEYSET_FIELDS = {"first_seen": "first_seen"}
 
-    async def list(
-        self,
-        platform: Optional[str] = None,
-        offset: int = 0,
-        limit: Optional[int] = None,
-        sort_field: Optional[str] = None,
-        sort_order: Optional[str] = None,
-    ) -> ListPage:
-        params = {"request_data": {"filters": []}}
-        if platform:
-            params["request_data"]["filters"].append(
-                {"field": "platform", "operator": "in", "value": [platform]}
-            )
-        return await self._paginated_list(
-            "endpoints/get_endpoint",
-            params,
-            "endpoints",
-            offset=offset,
-            limit=limit,
-            sort_field=sort_field,
-            sort_order=sort_order,
-        )
+    def _list_filters(self, platform: Optional[str] = None) -> List[Dict]:
+        if not platform:
+            return []
+        return [{"field": "platform", "operator": "in", "value": [platform]}]
 
     async def get_by_hostname(self, hostname: str) -> List[Dict]:
         parameters = {
