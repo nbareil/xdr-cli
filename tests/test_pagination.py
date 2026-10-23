@@ -1,6 +1,12 @@
 import asyncio
 
+import pytest
+
+from xdr_cli.errors import XdrValidationError
+from xdr_cli.services.alerts import AlertsService
 from xdr_cli.services.base import BaseService
+from xdr_cli.services.endpoints import EndpointsService
+from xdr_cli.services.incidents import IncidentsService
 
 
 class ScriptedTransport:
@@ -41,12 +47,16 @@ class FakeClient:
         self.transport = transport
 
 
+class SortableService(BaseService):
+    SORT_FIELDS = ("id", "ts")
+
+
 def run(coro):
     return asyncio.run(coro)
 
 
 def fetch(transport, **kwargs):
-    service = BaseService(FakeClient(transport))
+    service = SortableService(FakeClient(transport))
     return run(service._paginated_list("x/y", {"request_data": {}}, "rows", **kwargs))
 
 
@@ -122,3 +132,54 @@ def test_oversized_reply_is_trimmed_to_limit():
     page = fetch(transport, limit=4)
     assert [r["id"] for r in page.items] == [0, 1, 2, 3]
     assert page.next_offset == 4
+
+
+def empty_transport(n=1):
+    return ScriptedTransport([{"reply": {"rows": [], "total_count": 0}}] * n)
+
+
+def test_default_sort_is_sent_on_every_request():
+    tenant = FakeTenant(total=150)
+    service = SortableService(FakeClient(tenant))
+    seen = []
+    original = tenant.post_json
+
+    async def spy(uri, params):
+        seen.append(dict(params["request_data"]["sort"]))
+        return await original(uri, params)
+
+    tenant.post_json = spy
+    page = run(service._paginated_list("x/y", {"request_data": {}}, "rows"))
+    assert seen == [{"field": "id", "keyword": "desc"}] * 2
+    assert (page.sort_field, page.sort_order) == ("id", "desc")
+
+
+def test_explicit_sort_is_forwarded():
+    transport = empty_transport()
+    page = fetch(transport, sort_field="ts", sort_order="asc")
+    assert transport.calls[0]["request_data"]["sort"] == {"field": "ts", "keyword": "asc"}
+    assert (page.sort_field, page.sort_order) == ("ts", "asc")
+
+
+@pytest.mark.parametrize("kwargs", [{"sort_field": "bogus"}, {"sort_order": "sideways"}])
+def test_invalid_sort_rejected_before_any_request(kwargs):
+    transport = empty_transport()
+    with pytest.raises(XdrValidationError):
+        fetch(transport, **kwargs)
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "service_cls, method_kwargs, expected",
+    [
+        (AlertsService, {}, {"field": "creation_time", "keyword": "desc"}),
+        (IncidentsService, {}, {"field": "incident_id", "keyword": "desc"}),
+        (EndpointsService, {"platform": "linux"}, {"field": "endpoint_id", "keyword": "asc"}),
+    ],
+)
+def test_service_default_sorts(service_cls, method_kwargs, expected):
+    # Defaults were picked against a live tenant: these are the fields each
+    # endpoint actually honours (see the SORT_FIELDS comments).
+    transport = empty_transport()
+    run(service_cls(FakeClient(transport)).list(**method_kwargs))
+    assert transport.calls[0]["request_data"]["sort"] == expected

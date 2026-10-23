@@ -8,8 +8,18 @@ from .base import BaseService
 
 
 class EndpointsService(BaseService):
+    # last_seen is accepted by get_endpoint but does not actually order the
+    # results, and endpoint_name is rejected, so neither is offered.
+    SORT_FIELDS = ("endpoint_id", "first_seen")
+    DEFAULT_SORT_ORDER = "asc"
+
     async def list(
-        self, platform: Optional[str] = None, offset: int = 0, limit: Optional[int] = None
+        self,
+        platform: Optional[str] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        sort_field: Optional[str] = None,
+        sort_order: Optional[str] = None,
     ) -> ListPage:
         params = {"request_data": {"filters": []}}
         if platform:
@@ -17,7 +27,13 @@ class EndpointsService(BaseService):
                 {"field": "platform", "operator": "in", "value": [platform]}
             )
         return await self._paginated_list(
-            "endpoints/get_endpoint", params, "endpoints", offset=offset, limit=limit
+            "endpoints/get_endpoint",
+            params,
+            "endpoints",
+            offset=offset,
+            limit=limit,
+            sort_field=sort_field,
+            sort_order=sort_order,
         )
 
     async def get_by_hostname(self, hostname: str) -> List[Dict]:

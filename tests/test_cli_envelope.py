@@ -73,7 +73,10 @@ def test_list_rejects_negative_offset():
 
 
 def test_render_page_json_includes_paging_meta():
-    page = ListPage(items=[{"id": 1, "x": 2}], offset=10, total_count=50, next_offset=11)
+    page = ListPage(
+        items=[{"id": 1, "x": 2}], offset=10, total_count=50, next_offset=11,
+        sort_field="creation_time", sort_order="desc",
+    )
 
     @click.command()
     @click.pass_context
@@ -83,11 +86,19 @@ def test_render_page_json_includes_paging_meta():
 
     payload = json.loads(CliRunner().invoke(show).output)
     assert payload["data"] == [{"id": 1}]
-    assert payload["meta"] == {"offset": 10, "total_count": 50, "next_offset": 11}
+    assert payload["meta"] == {
+        "offset": 10,
+        "total_count": 50,
+        "next_offset": 11,
+        "sort": {"field": "creation_time", "order": "desc"},
+    }
 
 
 def test_render_page_text_hints_next_offset_on_stderr():
-    page = ListPage(items=[{"id": 1}], offset=0, total_count=5, next_offset=1)
+    page = ListPage(
+        items=[{"id": 1}], offset=0, total_count=5, next_offset=1,
+        sort_field="creation_time", sort_order="desc",
+    )
 
     @click.command()
     @click.pass_context
@@ -98,3 +109,9 @@ def test_render_page_text_hints_next_offset_on_stderr():
     result = CliRunner(mix_stderr=False).invoke(show)
     assert json.loads(result.stdout) == {"id": 1}
     assert "--offset 1" in result.stderr
+
+
+def test_list_rejects_unsupported_sort_field():
+    # alert_id is not sortable server-side (get_alerts returns 500).
+    result = CliRunner().invoke(cli, AUTH + ["alert", "list", "--sort", "alert_id"])
+    assert result.exit_code == 2

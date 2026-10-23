@@ -28,3 +28,5 @@ class ListPage:
     offset: int
     total_count: int
     next_offset: Optional[int]
+    sort_field: str
+    sort_order: str

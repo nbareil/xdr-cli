@@ -72,10 +72,16 @@ predictable for scripts and AI agents:
   the envelope carries a `meta` object (`offset`, `total_count`, `next_offset`); pass
   `next_offset` back as `--offset` to fetch the next page. It is `null` on the last page.
   Without `--json`, a `next page: --offset N` hint goes to stderr.
+- Results are always explicitly sorted, so the same offset returns the same rows. Use
+  `--sort FIELD` and `--order asc|desc` to change it, and keep them the same while paging.
+  Defaults: alerts `creation_time` desc, incidents `incident_id` desc, endpoints
+  `endpoint_id` asc. Only fields the API sorts correctly are offered: alerts
+  `creation_time`, `severity`; incidents `incident_id`, `creation_time`,
+  `modification_time`; endpoints `endpoint_id`, `first_seen`.
 
 ```
 $ xdr-cli --json --read-only endpoint list --platform linux --fields endpoint_name,ip --limit 5
-{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...], "meta": {"offset": 0, "total_count": 42, "next_offset": 5}}
+{"ok": true, "data": [{"endpoint_name": "host1", "ip": ["10.0.0.1"]}, ...], "meta": {"offset": 0, "total_count": 42, "next_offset": 5, "sort": {"field": "endpoint_id", "order": "asc"}}}
 
 $ xdr-cli --json alert list --offset 100 --limit 100
 

@@ -6,6 +6,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from ..client import XdrClient
 from ..errors import XdrValidationError
 from ..models import ListPage, XdrClientOptions, XdrTenant
+from ..services.alerts import AlertsService
+from ..services.endpoints import EndpointsService
+from ..services.incidents import IncidentsService
 
 
 @dataclass
@@ -29,24 +32,36 @@ def _obj(properties: Dict[str, Any], required: Optional[List[str]] = None) -> Di
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 _PAGING_DOC = (
-    " Returns {items, offset, total_count, next_offset}; pass next_offset as"
-    " 'offset' to fetch the next page (null when there are no more rows)."
+    " Returns {items, offset, total_count, next_offset, sort_field, sort_order};"
+    " pass next_offset as 'offset' (with the same sort) to fetch the next page"
+    " (null when there are no more rows)."
 )
+
+
+def _paging_props(service_cls) -> Dict[str, Any]:
+    return {
+        "offset": _INT,
+        "limit": _INT,
+        "sort_field": {"type": "string", "enum": list(service_cls.SORT_FIELDS),
+                       "description": "Default: %s" % service_cls.SORT_FIELDS[0]},
+        "sort_order": {"type": "string", "enum": ["asc", "desc"],
+                       "description": "Default: %s" % service_cls.DEFAULT_SORT_ORDER},
+    }
 
 
 TOOL_SPECS: List[ToolSpec] = [
     ToolSpec("endpoint_list", "List endpoints, optionally filtered by platform." + _PAGING_DOC,
-             _obj({"platform": _STR, "offset": _INT, "limit": _INT})),
+             _obj({"platform": _STR, **_paging_props(EndpointsService)})),
     ToolSpec("endpoint_get", "Get endpoint details by hostname.",
              _obj({"hostname": _STR, "field": _STR}, required=["hostname"])),
     ToolSpec("endpoint_who_has", "Resolve an IP address to endpoint(s).",
              _obj({"ip": _STR}, required=["ip"])),
-    ToolSpec("incident_list", "List incidents." + _PAGING_DOC, _obj({"offset": _INT, "limit": _INT})),
+    ToolSpec("incident_list", "List incidents." + _PAGING_DOC, _obj(_paging_props(IncidentsService))),
     ToolSpec("incident_get", "Get extra data for an incident.",
              _obj({"incident_id": _STR}, required=["incident_id"])),
     ToolSpec("incident_close", "Close (resolve) an incident.",
              _obj({"incident_id": _STR}, required=["incident_id"]), mutating=True),
-    ToolSpec("alert_list", "List alerts." + _PAGING_DOC, _obj({"offset": _INT, "limit": _INT})),
+    ToolSpec("alert_list", "List alerts." + _PAGING_DOC, _obj(_paging_props(AlertsService))),
     ToolSpec("alert_close", "Close (resolve) one or more alerts.",
              _obj({"alert_ids": {"type": "array", "items": _INT}}, required=["alert_ids"]), mutating=True),
     ToolSpec("triage_presets", "List triage presets.", _obj({})),
@@ -118,7 +133,12 @@ def _paging(args: Dict[str, Any]) -> Dict[str, Any]:
         raise XdrValidationError("offset must be >= 0")
     if limit is not None and int(limit) < 1:
         raise XdrValidationError("limit must be >= 1")
-    return {"offset": offset, "limit": int(limit) if limit is not None else None}
+    return {
+        "offset": offset,
+        "limit": int(limit) if limit is not None else None,
+        "sort_field": args.get("sort_field"),
+        "sort_order": args.get("sort_order"),
+    }
 
 
 async def _page(coro: Awaitable[ListPage]) -> Dict[str, Any]:

@@ -26,6 +26,9 @@ from .output.envelope import (
     exit_code_for,
 )
 from .output.excel import write_xql_results_excel
+from .services.alerts import AlertsService
+from .services.endpoints import EndpointsService
+from .services.incidents import IncidentsService
 
 # API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
 
@@ -132,10 +135,36 @@ def _render_list(ctx: click.Context, items: List[Dict], fields: Optional[List[st
         click.echo(json.dumps(item, indent=indent))
 
 
+def _sort_options(service_cls) -> Callable:
+    """--sort/--order options listing the fields the service can sort by."""
+
+    def decorator(f: Callable) -> Callable:
+        f = click.option(
+            "--order",
+            type=click.Choice(["asc", "desc"]),
+            default=None,
+            help="Sort order (default: %s)" % service_cls.DEFAULT_SORT_ORDER,
+        )(f)
+        return click.option(
+            "--sort",
+            "sort_field",
+            type=click.Choice(list(service_cls.SORT_FIELDS)),
+            default=None,
+            help="Sort field (default: %s)" % service_cls.SORT_FIELDS[0],
+        )(f)
+
+    return decorator
+
+
 def _render_page(ctx: click.Context, page: ListPage, fields: Optional[List[str]] = None, indent: Optional[int] = None) -> None:
     projected = [_project(i, fields) for i in page.items] if fields else page.items
     if _json_mode(ctx):
-        meta = {"offset": page.offset, "total_count": page.total_count, "next_offset": page.next_offset}
+        meta = {
+            "offset": page.offset,
+            "total_count": page.total_count,
+            "next_offset": page.next_offset,
+            "sort": {"field": page.sort_field, "order": page.sort_order},
+        }
         emit(ctx, projected, meta=meta)
         return
     for item in projected:
@@ -227,9 +256,13 @@ def incident(ctx):
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
 @click.option("--offset", "-o", help="Skip the first N incidents", type=click.IntRange(min=0), default=0)
 @click.option("--limit", "-l", help="Stop after N incidents", type=click.IntRange(min=1), default=None)
+@_sort_options(IncidentsService)
 @click.pass_context
-def list_incidents(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int]):
-    page = _execute(ctx, lambda client: client.incidents.list(offset=offset, limit=limit))
+def list_incidents(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int], sort_field: Optional[str], order: Optional[str]):
+    page = _execute(
+        ctx,
+        lambda client: client.incidents.list(offset=offset, limit=limit, sort_field=sort_field, sort_order=order),
+    )
     _render_page(ctx, page, fields=_parse_fields(fields))
 
 
@@ -266,9 +299,13 @@ def alert(ctx):
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
 @click.option("--offset", "-o", help="Skip the first N alerts", type=click.IntRange(min=0), default=0)
 @click.option("--limit", "-l", help="Stop after N alerts", type=click.IntRange(min=1), default=None)
+@_sort_options(AlertsService)
 @click.pass_context
-def list_alerts(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int]):
-    page = _execute(ctx, lambda client: client.alerts.list(offset=offset, limit=limit))
+def list_alerts(ctx: click.Context, fields: Optional[str], offset: int, limit: Optional[int], sort_field: Optional[str], order: Optional[str]):
+    page = _execute(
+        ctx,
+        lambda client: client.alerts.list(offset=offset, limit=limit, sort_field=sort_field, sort_order=order),
+    )
     _render_page(ctx, page, fields=_parse_fields(fields))
 
 
@@ -298,10 +335,16 @@ def endpoint(ctx: click.Context):
 @click.option("--fields", "-f", help="Comma-separated keys to keep", type=str)
 @click.option("--offset", "-o", help="Skip the first N endpoints", type=click.IntRange(min=0), default=0)
 @click.option("--limit", "-l", help="Stop after N endpoints", type=click.IntRange(min=1), default=None)
+@_sort_options(EndpointsService)
 @click.pass_context
-def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, offset: int = 0, limit: Optional[int] = None):
+def endpoint_list(ctx: click.Context, platform: str = "", fields: Optional[str] = None, offset: int = 0, limit: Optional[int] = None, sort_field: Optional[str] = None, order: Optional[str] = None):
     """List endpoints, optionally filtered by platform."""
-    page = _execute(ctx, lambda client: client.endpoints.list(platform=platform or None, offset=offset, limit=limit))
+    page = _execute(
+        ctx,
+        lambda client: client.endpoints.list(
+            platform=platform or None, offset=offset, limit=limit, sort_field=sort_field, sort_order=order
+        ),
+    )
     _render_page(ctx, page, fields=_parse_fields(fields), indent=4)
 
 
