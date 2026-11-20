@@ -93,3 +93,15 @@ def test_script_run_help_includes_hostname_option():
 
     assert result.exit_code == 0
     assert "--hostname TEXT" in result.output
+
+
+def test_run_snippet_reports_rejected_script():
+    client = FakeClient()
+
+    async def rejected(uri, params):
+        return {"reply": ['Contains import of unsupported module "paramiko"']}
+
+    client.transport.post_json = rejected
+    service = ScriptsService(client)
+    with pytest.raises(XdrValidationError, match='rejected the script: .*"paramiko"'):
+        run(service.run_snippet("import paramiko", endpoint_ids=["e1"]))

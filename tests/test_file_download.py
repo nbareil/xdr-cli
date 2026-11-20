@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from xdr_cli.errors import XdrApiError, XdrTransportError
+from xdr_cli.errors import XdrApiError, XdrFileTooLargeError, XdrTransportError, XdrValidationError
 from xdr_cli.http import XdrTransport
 from xdr_cli.models import XdrClientOptions, XdrCredentials, XdrTenant
 from xdr_cli.services.files import FilesService
@@ -59,15 +59,16 @@ def test_download_url_network_error_removes_partial_file(tmp_path):
 
 
 class FakeTransport:
-    def __init__(self, statuses):
+    def __init__(self, statuses, reasons=None):
         self.statuses = list(statuses)
+        self.reasons = reasons or {}
         self.downloads = []
 
     async def post_json(self, uri, params):
         if uri == "endpoints/file_retrieval":
             return {"reply": {"action_id": 7}}
         if uri == "actions/get_action_status":
-            return {"reply": {"data": {"e1": self.statuses.pop(0)}}}
+            return {"reply": {"data": {"e1": self.statuses.pop(0)}, "errorReasons": self.reasons}}
         if uri == "actions/file_retrieval_details":
             return {"reply": {"data": {"e1": "https://dl.example/f"}}}
         raise AssertionError(uri)
@@ -98,3 +99,20 @@ def test_retrieve_to_file_waits_then_streams(tmp_path):
 def test_retrieve_still_returns_bytes():
     service = FilesService(FakeClient(FakeTransport(["COMPLETED_SUCCESSFULLY"])))
     assert asyncio.run(service.retrieve("e1", ["/etc/hosts"], poll_interval_seconds=0)) == b"zip"
+
+
+def failed(description):
+    return FakeTransport(["FAILED"], {"e1": {"missing_files": [{"path": "/x", "description": description}]}})
+
+
+def test_retrieve_reports_size_limit(tmp_path):
+    service = FilesService(FakeClient(failed("Maximum file size reached")))
+    with pytest.raises(XdrFileTooLargeError, match="FAILED: Maximum file size reached"):
+        asyncio.run(service.retrieve_to_file("e1", ["/x"], tmp_path / "a.zip", poll_interval_seconds=0))
+
+
+def test_retrieve_reports_other_failures(tmp_path):
+    service = FilesService(FakeClient(failed("File not found")))
+    with pytest.raises(XdrValidationError, match="FAILED: File not found") as excinfo:
+        asyncio.run(service.retrieve_to_file("e1", ["/x"], tmp_path / "a.zip", poll_interval_seconds=0))
+    assert not isinstance(excinfo.value, XdrFileTooLargeError)

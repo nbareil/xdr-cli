@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import click
 
+from .archive import INNER_ARCHIVE, RETRIEVAL_PASSWORD, safe_extract_zip
 from .client import XdrClient
 from .errors import XdrError
 from .models import XdrClientOptions, XdrCredentials, XdrTenant
@@ -30,6 +31,7 @@ from .output.excel import write_xql_results_excel
 from .services.alerts import AlertsService
 from .services.endpoints import EndpointsService
 from .services.incidents import IncidentsService
+from .services.large_files import SftpTarget, endpoint_script_source, fetch_from_sftp
 
 # API Documentation: https://cortex-panw.stoplight.io/docs/cortex-xdr/branches/main/axpm6b98x4p18-cortex-xdr-api-overview
 
@@ -662,70 +664,6 @@ def file_restore(ctx, endpoint_id, hostname, sha256, dry_run):
 # --------------------------------------------------------------------------- #
 # get-file (retrieve + extract)
 # --------------------------------------------------------------------------- #
-_S_IFMT = 0o170000
-_S_IFLNK = 0o120000
-
-
-def _check_zip_members(zf: zipfile.ZipFile, output_dir: pathlib.Path) -> List[zipfile.ZipInfo]:
-    """Return the file members of ``zf``, refusing any that would land
-    outside ``output_dir``. Symlinks are refused too: an external extractor
-    would create them, and a later member could then be written through one."""
-    root = str(output_dir.resolve())
-    members = []
-    for member in zf.infolist():
-        name = member.filename
-        if not name or name.endswith("/"):
-            continue
-        destination = (output_dir / name).resolve()
-        if os.path.commonpath([root, str(destination)]) != root:
-            raise click.ClickException(f"Unsafe zip entry path: {name}")
-        if (member.external_attr >> 16) & _S_IFMT == _S_IFLNK:
-            raise click.ClickException(f"Unsafe zip entry (symlink): {name}")
-        members.append(member)
-    return members
-
-
-def _external_unzip_command(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes) -> Optional[List[str]]:
-    """Command line of the first native extractor found, or None.
-
-    The retrieval password is a fixed, public value, so passing it on the
-    command line leaks nothing."""
-    pwd = password.decode()
-    for name in ("7zz", "7z", "7za"):
-        exe = shutil.which(name)
-        if exe:
-            return [exe, "x", "-y", "-bd", "-bso0", "-bsp0", f"-p{pwd}", f"-o{output_dir}", str(zip_path)]
-    exe = shutil.which("unzip")
-    if exe:
-        return [exe, "-q", "-o", "-P", pwd, str(zip_path), "-d", str(output_dir)]
-    return None
-
-
-def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes):
-    """Extract a retrieval archive into ``output_dir``.
-
-    XDR encrypts retrieval archives with ZipCrypto, which the stdlib decrypts
-    in pure Python at about 1 MB/s; 7-Zip and Info-ZIP unzip do it at disk
-    speed. Use them when installed and fall back to zipfile otherwise."""
-    with zipfile.ZipFile(zip_path) as zf:
-        members = _check_zip_members(zf, output_dir)
-        cmd = _external_unzip_command(zip_path, output_dir, password)
-        if cmd:
-            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True)
-            if proc.returncode == 0:
-                return
-            logger.warning(
-                "%s failed to extract %s (exit %d: %s); falling back to Python",
-                os.path.basename(cmd[0]), zip_path, proc.returncode,
-                (proc.stderr or proc.stdout).strip()[:300],
-            )
-        for member in members:
-            destination = output_dir / member.filename
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member, pwd=password) as src, open(destination, "wb") as dst:
-                shutil.copyfileobj(src, dst, 1024 * 1024)
-
-
 def _flatten_endpoint_path(path: str) -> str:
     normalized = path.replace("\\", "_").replace("/", "_").replace(":", "")
     normalized = normalized.lower()
@@ -786,13 +724,13 @@ def _rename_payload_files_from_manifest(output_dir: pathlib.Path) -> None:
 
 def _extract_retrieved_file_zip(outer_zip_path: pathlib.Path, output_dir: pathlib.Path) -> None:
     """Extract a downloaded retrieval archive, then delete it."""
-    password = b"suspicious"
+    password = RETRIEVAL_PASSWORD
     output_dir.mkdir(parents=True, exist_ok=True)
-    _safe_extract_zip(outer_zip_path, output_dir, password)
+    safe_extract_zip(outer_zip_path, output_dir, password)
 
-    inner_zip_path = output_dir / "script_output.zip"
+    inner_zip_path = output_dir / INNER_ARCHIVE
     if inner_zip_path.exists():
-        _safe_extract_zip(inner_zip_path, output_dir, password)
+        safe_extract_zip(inner_zip_path, output_dir, password)
         _rename_payload_files_from_manifest(output_dir)
         inner_zip_path.unlink()
     outer_zip_path.unlink()
@@ -819,9 +757,136 @@ def get_file(ctx: click.Context, endpoint_id: str, path: List[str], output: path
             endpoint_id=endpoint_id, hostname=hostname, paths=list(path), destination=archive
         ),
     )
-    _extract_retrieved_file_zip(archive, output)
+    try:
+        _extract_retrieved_file_zip(archive, output)
+    except XdrError as exc:
+        emit_error(ctx, error_code_for(exc), str(exc), exit_code_for(exc))
     if _json_mode(ctx):
         emit(ctx, {"output_dir": str(output), "paths": list(path)})
+
+
+# --------------------------------------------------------------------------- #
+# get-large-file (chunks or SFTP upload)
+# --------------------------------------------------------------------------- #
+_SIZE_UNITS = {"": 1, "K": 2 ** 10, "M": 2 ** 20, "G": 2 ** 30}
+
+
+class ByteSize(click.ParamType):
+    """A byte count with an optional K, M or G (binary) suffix."""
+
+    name = "size"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int):
+            return value
+        match = re.fullmatch(r"(\d+)\s*([KMG]?)(?:I?B)?", str(value).strip().upper())
+        if not match:
+            self.fail("%r is not a size such as 100M or 1G" % value, param, ctx)
+        return int(match.group(1)) * _SIZE_UNITS[match.group(2)]
+
+
+def _remote_basename(path: str) -> str:
+    """File name of an endpoint path, Windows or POSIX."""
+    return re.split(r"[\\/]", path)[-1] or "file"
+
+
+@cli.command("get-large-file")
+@click.option("--endpoint-id", type=str, help="Endpoint ID")
+@click.option("--hostname", type=str, help="Endpoint hostname, must match one connected endpoint")
+@click.argument("path", required=False)
+@click.option(
+    "--output", "-o",
+    type=click.Path(dir_okay=False, writable=True, path_type=pathlib.Path),
+    help="Local file to write. Required with --via chunks; with --via sftp, download "
+         "the uploaded file back and check its SHA-256.",
+)
+@click.option("--via", type=click.Choice(["chunks", "sftp"]), default="chunks", show_default=True,
+              help="chunks: one get-file per gzip chunk, works on isolated endpoints. "
+                   "sftp: the endpoint uploads to an SFTP server.")
+@click.option("--chunk-size", type=ByteSize(), default="100M", show_default=True,
+              help="Compressed size of each chunk; halved automatically if the tenant refuses it")
+@click.option("--max-raw", type=ByteSize(), default="2G", show_default=True,
+              help="Uncompressed bytes per chunk at most, bounds each action on compressible files")
+@click.option("--no-hash", is_flag=True, help="Skip the full-file SHA-256 on the endpoint")
+@click.option("--script-timeout", default=600, show_default=True, help="Seconds per chunk script")
+@click.option("--sftp-host", help="SFTP server, as this workstation reaches it")
+@click.option("--sftp-port", default=22, show_default=True)
+@click.option("--sftp-user", help="SFTP account")
+@click.option("--sftp-password-file", type=click.File(),
+              help="File holding the SFTP password. It is embedded in the XDR scripts, which "
+                   "the tenant keeps in its action history.")
+@click.option("--sftp-host-key", help='Pinned host key, "ssh-ed25519 AAAA...". Without it, the key '
+                                      "seen from this workstation is trusted.")
+@click.option("--endpoint-sftp-host", help="SFTP server as the endpoint reaches it, e.g. an IP when it has no DNS")
+@click.option("--remote-path", help="Upload destination, defaults to incoming/<host>_<file name>")
+@click.option("--time-budget", default=480, show_default=True,
+              help="Seconds of upload per XDR action; actions are chained until done")
+@click.option("--compression", is_flag=True, help="Enable SSH compression")
+@click.option("--resume", is_flag=True, help="Resume from an existing <remote-path>.part")
+@click.option("--delete-remote", is_flag=True, help="With -o, delete the uploaded file once verified")
+@click.option("--print-script", is_flag=True, help="Print the endpoint script, to run it by hand from the XDR console")
+@click.pass_context
+def get_large_file(ctx: click.Context, endpoint_id, hostname, path, output, via, chunk_size, max_raw,
+                   no_hash, script_timeout, sftp_host, sftp_port, sftp_user, sftp_password_file,
+                   sftp_host_key, endpoint_sftp_host, remote_path, time_budget, compression, resume,
+                   delete_remote, print_script):
+    """Retrieve a file larger than the get-file limit.
+
+    Rerun the same command to resume after a failure.
+    """
+    if print_script:
+        click.echo(endpoint_script_source(), nl=False)
+        return
+    problems = []
+    if not path:
+        problems.append("PATH is required")
+    if not (endpoint_id or hostname):
+        problems.append("pass --endpoint-id or --hostname")
+    if via == "chunks" and not output:
+        problems.append("--via chunks needs -o/--output")
+    if via == "sftp" and not (sftp_host and sftp_user and sftp_password_file):
+        problems.append("--via sftp needs --sftp-host, --sftp-user and --sftp-password-file")
+    if delete_remote and not output:
+        problems.append("--delete-remote needs -o/--output")
+    if problems:
+        emit_error(ctx, "VALIDATION", "; ".join(problems), EXIT_USAGE)
+
+    def progress(message: str) -> None:
+        click.echo(message, err=True)
+
+    if via == "chunks":
+        async def op(client):
+            eid = await client.large_files.resolve_endpoint(endpoint_id, hostname)
+            state = await client.large_files.fetch_chunked(
+                eid, path, output, chunk_bytes=chunk_size, max_raw_bytes=max_raw,
+                verify_hash=not no_hash, script_timeout=script_timeout, progress=progress,
+            )
+            return {"output": str(output), "size": state.size, "sha256": state.sha256,
+                    "chunks": len(state.chunks)}
+    else:
+        target = SftpTarget(
+            host=sftp_host, port=sftp_port, username=sftp_user,
+            password=sftp_password_file.read().strip(), host_key=sftp_host_key,
+            endpoint_host=endpoint_sftp_host,
+        )
+        remote = remote_path or "incoming/%s_%s" % (hostname or endpoint_id, _remote_basename(path))
+
+        async def op(client):
+            eid = await client.large_files.resolve_endpoint(endpoint_id, hostname)
+            info = await client.large_files.upload_sftp(
+                eid, path, target, remote, time_budget=time_budget, compression=compression,
+                resume=resume, verify_hash=not no_hash, progress=progress,
+            )
+            if output:
+                fetch_from_sftp(target, remote, output, info.get("sha256"), delete_remote, progress)
+            return {"remote_path": remote, "size": info["size"], "sha256": info.get("sha256"),
+                    "output": str(output) if output else None}
+
+    try:
+        result = _execute(ctx, op)
+    except OSError as exc:
+        emit_error(ctx, "ERROR", str(exc))
+    _render_obj(ctx, result)
 
 
 # --------------------------------------------------------------------------- #

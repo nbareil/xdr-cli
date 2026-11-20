@@ -9,6 +9,10 @@ class XdrValidationError(XdrError):
     pass
 
 
+class XdrFileTooLargeError(XdrValidationError):
+    """The agent refused a file retrieval: the file exceeds the tenant limit."""
+
+
 class XdrAuthError(XdrError):
     pass
 

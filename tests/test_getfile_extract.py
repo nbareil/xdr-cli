@@ -6,16 +6,12 @@ import stat
 import subprocess
 import zipfile
 
-import click
 import pytest
 
-from xdr_cli import xdr_cli as cli_module
-from xdr_cli.xdr_cli import (
-    _external_unzip_command,
-    _extract_retrieved_file_zip,
-    _flatten_endpoint_path,
-    _safe_extract_zip,
-)
+from xdr_cli import archive as archive_module
+from xdr_cli.archive import external_unzip_command, retrieved_file, safe_extract_zip
+from xdr_cli.errors import XdrValidationError
+from xdr_cli.xdr_cli import _extract_retrieved_file_zip, _flatten_endpoint_path
 
 
 PASSWORD = b"suspicious"
@@ -44,7 +40,7 @@ def extractor(request, monkeypatch):
         if not NATIVE:
             pytest.skip("neither 7-Zip nor unzip is installed")
     else:
-        monkeypatch.setattr(cli_module.shutil, "which", lambda name: None)
+        monkeypatch.setattr(archive_module.shutil, "which", lambda name: None)
     return request.param
 
 
@@ -70,14 +66,14 @@ def test_flatten_endpoint_path(raw, expected):
     assert _flatten_endpoint_path(raw) == expected
 
 
-# --- _safe_extract_zip (zip-slip guard) ------------------------------------ #
+# --- safe_extract_zip (zip-slip guard) ------------------------------------ #
 
 def test_safe_extract_writes_members(tmp_path, extractor):
     zip_path = tmp_path / "in.zip"
     zip_path.write_bytes(_make_zip({"a.txt": b"hello", "sub/b.txt": b"world"}))
     out = tmp_path / "out"
     out.mkdir()
-    _safe_extract_zip(zip_path, out, PASSWORD)
+    safe_extract_zip(zip_path, out, PASSWORD)
     assert (out / "a.txt").read_bytes() == b"hello"
     assert (out / "sub" / "b.txt").read_bytes() == b"world"
 
@@ -92,9 +88,9 @@ def test_safe_extract_rejects_path_traversal(tmp_path, extractor, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
     ran = []
-    monkeypatch.setattr(cli_module.subprocess, "run", lambda *a, **kw: ran.append(a))
-    with pytest.raises(click.ClickException, match="Unsafe zip entry path"):
-        _safe_extract_zip(zip_path, out, PASSWORD)
+    monkeypatch.setattr(archive_module.subprocess, "run", lambda *a, **kw: ran.append(a))
+    with pytest.raises(XdrValidationError, match="Unsafe zip entry path"):
+        safe_extract_zip(zip_path, out, PASSWORD)
     assert not (tmp_path / "escape.txt").exists()
     assert ran == []  # refused before any extractor runs
 
@@ -110,8 +106,8 @@ def test_safe_extract_rejects_symlinks(tmp_path, extractor):
     zip_path.write_bytes(buf.getvalue())
     out = tmp_path / "out"
     out.mkdir()
-    with pytest.raises(click.ClickException, match="symlink"):
-        _safe_extract_zip(zip_path, out, PASSWORD)
+    with pytest.raises(XdrValidationError, match="symlink"):
+        safe_extract_zip(zip_path, out, PASSWORD)
     assert list(out.iterdir()) == []
 
 
@@ -128,14 +124,14 @@ def test_safe_extract_decrypts_zipcrypto(tmp_path, extractor):
         assert zf.infolist()[0].flag_bits & 0x1  # really encrypted
     out = tmp_path / "out"
     out.mkdir()
-    _safe_extract_zip(zip_path, out, PASSWORD)
+    safe_extract_zip(zip_path, out, PASSWORD)
     assert (out / "payload.bin").read_bytes() == payload.read_bytes()
 
 
 def test_native_failure_falls_back_to_python(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(cli_module.shutil, "which", lambda name: "/usr/bin/unzip" if name == "unzip" else None)
+    monkeypatch.setattr(archive_module.shutil, "which", lambda name: "/usr/bin/unzip" if name == "unzip" else None)
     monkeypatch.setattr(
-        cli_module.subprocess, "run",
+        archive_module.subprocess, "run",
         lambda *a, **kw: subprocess.CompletedProcess(a, 2, stdout="", stderr="unsupported method"),
     )
     zip_path = tmp_path / "in.zip"
@@ -143,7 +139,7 @@ def test_native_failure_falls_back_to_python(tmp_path, monkeypatch, caplog):
     out = tmp_path / "out"
     out.mkdir()
     with caplog.at_level(logging.WARNING):
-        _safe_extract_zip(zip_path, out, PASSWORD)
+        safe_extract_zip(zip_path, out, PASSWORD)
     assert (out / "a.txt").read_bytes() == b"hello"
     assert "unsupported method" in caplog.text
 
@@ -159,8 +155,8 @@ def test_native_failure_falls_back_to_python(tmp_path, monkeypatch, caplog):
     ],
 )
 def test_external_unzip_command_preference(tmp_path, monkeypatch, installed, expected):
-    monkeypatch.setattr(cli_module.shutil, "which", lambda name: "/bin/" + name if name in installed else None)
-    cmd = _external_unzip_command(tmp_path / "a.zip", tmp_path / "out", PASSWORD)
+    monkeypatch.setattr(archive_module.shutil, "which", lambda name: "/bin/" + name if name in installed else None)
+    cmd = external_unzip_command(tmp_path / "a.zip", tmp_path / "out", PASSWORD)
     if expected is None:
         assert cmd is None
     else:
@@ -208,3 +204,27 @@ def test_extract_retrieved_file_without_inner_zip(tmp_path, extractor):
     _extract_retrieved_file_zip(outer, out)
     assert (out / "plain.txt").read_bytes() == b"data"
     assert not outer.exists()
+
+
+# --- retrieved_file (manifest lookup) -------------------------------------- #
+
+def test_retrieved_file_follows_windows_manifest(tmp_path):
+    (tmp_path / "entry_1_0").mkdir()
+    (tmp_path / "entry_1_0" / "hosts").write_bytes(b"127.0.0.1")
+    (tmp_path / "stdout.txt").write_text("agent noise")
+    (tmp_path / "manifest.json").write_text(json.dumps(
+        {"entries": [{"files": [{"path": "C:\\hosts", "archivedPath": "entry_1_0\\hosts"}]}]}
+    ))
+    assert retrieved_file(tmp_path) == tmp_path / "entry_1_0" / "hosts"
+
+
+def test_retrieved_file_without_manifest(tmp_path):
+    (tmp_path / "only.bin").write_bytes(b"x")
+    assert retrieved_file(tmp_path) == tmp_path / "only.bin"
+
+
+def test_retrieved_file_ambiguous(tmp_path):
+    (tmp_path / "a").write_bytes(b"x")
+    (tmp_path / "b").write_bytes(b"y")
+    with pytest.raises(XdrValidationError, match="found 2"):
+        retrieved_file(tmp_path)

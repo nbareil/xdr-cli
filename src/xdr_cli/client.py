@@ -9,6 +9,7 @@ from .services.alerts import AlertsService
 from .services.endpoints import EndpointsService
 from .services.files import FilesService
 from .services.incidents import IncidentsService
+from .services.large_files import LargeFilesService
 from .services.scripts import ScriptsService
 from .services.triage import TriageService
 from .services.xql import XqlService
@@ -25,6 +26,7 @@ class XdrClient:
         self.files = FilesService(self)
         self.xql = XqlService(self)
         self.actions = ResponseActionsService(self)
+        self.large_files = LargeFilesService(self)
 
     async def aclose(self) -> None:
         await self.transport.aclose()

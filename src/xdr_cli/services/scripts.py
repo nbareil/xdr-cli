@@ -122,7 +122,12 @@ class ScriptsService(BaseService):
         if incident_id:
             params["request_data"]["incident_id"] = str(incident_id)
         obj = await self.transport.post_json("scripts/run_snippet_code_script", params)
-        return obj.get("reply", {})
+        reply = obj.get("reply", {})
+        if not isinstance(reply, dict):
+            # The tenant validates snippets and answers with a list of
+            # problems, e.g. an import outside the module allowlist.
+            raise XdrValidationError("XDR rejected the script: %s" % "; ".join(map(str, reply)))
+        return reply
 
     async def run_snippet_and_wait(
         self,

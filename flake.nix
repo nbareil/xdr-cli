@@ -36,6 +36,9 @@
             click
             httpx
             xlsxwriter
+            # The sftp extra, shipped by default so `get-large-file --via sftp`
+            # works from the nix package.
+            paramiko
           ];
 
           optional-dependencies = {

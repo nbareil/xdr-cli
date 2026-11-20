@@ -296,6 +296,33 @@ $ for id in $(xdr-cli --profile demo endpoint list --platform linux|jq .endpoint
 done
 ```
 
+## Acquire a file larger than the get-file limit
+
+The agent refuses to retrieve files over a size limit set by the tenant, with `Maximum file size reached`. `get-large-file` works around it with an endpoint script, in one of two ways:
+
+- `--via chunks` (default): the endpoint gzips the file one chunk at a time, and each chunk comes back through a regular file retrieval. It needs nothing but XDR, so it works on isolated endpoints, but it is as slow as file retrievals are.
+- `--via sftp`: the endpoint uploads the file to an SFTP server. Much faster, but the endpoint must reach the server.
+
+Both check the SHA-256 of the whole file, and both resume when you rerun the same command after a failure.
+
+```
+$ xdr-cli --profile demo get-large-file --hostname DESKTOP-V24D23 'C:\Windows\MEMORY.DMP' -o MEMORY.DMP
+```
+
+In chunk mode, at most one chunk sits on the endpoint's disk at a time, in `%TEMP%\xdrlf-<job>` or `/tmp/xdrlf-<job>`, and the staging directory is deleted at the end, including after an error. If the tenant refuses a chunk, `get-large-file` halves `--chunk-size` (100M by default) and tries again. Each chunk checks that the file's size and mtime haven't changed, so a file that is still being written fails fast instead of being reassembled inconsistently.
+
+The SFTP mode needs `paramiko` on the workstation (`pip install 'xdr-cli[sftp]'`); the endpoint uses the `pysftp` module bundled with the agent. `get-large-file` reads the server's host key from the workstation and the endpoint checks the server against it; pass `--sftp-host-key` to pin it instead. Uploads go to `<remote-path>.part`, renamed when complete, in actions of `--time-budget` seconds chained until done. With `-o`, the file is downloaded back and checked against the endpoint's SHA-256; `--delete-remote` then removes it from the server.
+
+```
+$ xdr-cli --profile demo get-large-file --hostname DESKTOP-V24D23 'C:\Windows\MEMORY.DMP' \
+    --via sftp --sftp-host sftp.example.com --sftp-user case42 --sftp-password-file pw.txt \
+    -o MEMORY.DMP --delete-remote
+```
+
+The SFTP password is embedded in every upload script, and the tenant keeps scripts in its action history. Use an account dedicated to the case and change its password afterwards.
+
+Files that another process holds open exclusively, such as registry hives or `NTDS.dit`, can't be read by the script; copy them from a volume shadow copy first. `--print-script` prints the endpoint script, to run it by hand from the XDR console after editing its `CONFIG` block.
+
 ## Execute XQL commands
 
 You can execute XQL queries from the command-line:

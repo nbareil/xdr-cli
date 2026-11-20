@@ -18,6 +18,9 @@ slack = [
 mcp = [
  "mcp; python_version >= '3.10'"
 ]
+sftp = [
+ "paramiko"
+]
 
 [project.scripts]
 xdr-cli = "xdr_cli.xdr_cli:cli"

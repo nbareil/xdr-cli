@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
-from ..errors import XdrOperationTimeoutError, XdrValidationError
+from ..errors import XdrFileTooLargeError, XdrOperationTimeoutError, XdrValidationError
 from .actions import FINAL_ACTION_STATES as _FINAL_STATES
 from .base import BaseService
 
 
 class FilesService(BaseService):
     async def get_action_status(self, action_id, endpoint_id) -> str:
+        reply = await self._action_status(action_id)
+        return reply.get("data", {}).get(endpoint_id, "")
+
+    async def _action_status(self, action_id) -> Dict[str, Any]:
         params = {"request_data": {"group_action_id": action_id}}
         obj = await self.transport.post_json("actions/get_action_status", params)
-        return obj.get("reply", {}).get("data", {}).get(endpoint_id, "")
+        return obj.get("reply", {})
 
     async def retrieve_details(self, action_id):
         params = {"request_data": {"group_action_id": action_id}}
@@ -55,7 +59,8 @@ class FilesService(BaseService):
 
         attempts = 0
         while True:
-            status = await self.get_action_status(action_id, endpoint_id)
+            reply = await self._action_status(action_id)
+            status = reply.get("data", {}).get(endpoint_id, "")
             if status in _FINAL_STATES:
                 break
             attempts += 1
@@ -63,7 +68,14 @@ class FilesService(BaseService):
                 raise XdrOperationTimeoutError("Timed out waiting for file retrieval action %s" % action_id)
             await asyncio.sleep(poll_interval_seconds)
         if not status.startswith("COMPLETED"):
-            raise XdrValidationError("File retrieval ended in state %s" % status)
+            reason = (reply.get("errorReasons") or {}).get(endpoint_id) or {}
+            missing = [m.get("description", "") for m in reason.get("missing_files") or []]
+            message = "File retrieval ended in state %s" % status
+            if missing:
+                message += ": %s" % "; ".join(missing)
+            if any("Maximum file size" in m for m in missing):
+                raise XdrFileTooLargeError(message)
+            raise XdrValidationError(message)
         details = await self.retrieve_details(action_id)
         dl_url = details.get(endpoint_id)
         if not dl_url:
