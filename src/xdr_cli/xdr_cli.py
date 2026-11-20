@@ -662,18 +662,68 @@ def file_restore(ctx, endpoint_id, hostname, sha256, dry_run):
 # --------------------------------------------------------------------------- #
 # get-file (retrieve + extract)
 # --------------------------------------------------------------------------- #
+_S_IFMT = 0o170000
+_S_IFLNK = 0o120000
+
+
+def _check_zip_members(zf: zipfile.ZipFile, output_dir: pathlib.Path) -> List[zipfile.ZipInfo]:
+    """Return the file members of ``zf``, refusing any that would land
+    outside ``output_dir``. Symlinks are refused too: an external extractor
+    would create them, and a later member could then be written through one."""
+    root = str(output_dir.resolve())
+    members = []
+    for member in zf.infolist():
+        name = member.filename
+        if not name or name.endswith("/"):
+            continue
+        destination = (output_dir / name).resolve()
+        if os.path.commonpath([root, str(destination)]) != root:
+            raise click.ClickException(f"Unsafe zip entry path: {name}")
+        if (member.external_attr >> 16) & _S_IFMT == _S_IFLNK:
+            raise click.ClickException(f"Unsafe zip entry (symlink): {name}")
+        members.append(member)
+    return members
+
+
+def _external_unzip_command(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes) -> Optional[List[str]]:
+    """Command line of the first native extractor found, or None.
+
+    The retrieval password is a fixed, public value, so passing it on the
+    command line leaks nothing."""
+    pwd = password.decode()
+    for name in ("7zz", "7z", "7za"):
+        exe = shutil.which(name)
+        if exe:
+            return [exe, "x", "-y", "-bd", "-bso0", "-bsp0", f"-p{pwd}", f"-o{output_dir}", str(zip_path)]
+    exe = shutil.which("unzip")
+    if exe:
+        return [exe, "-q", "-o", "-P", pwd, str(zip_path), "-d", str(output_dir)]
+    return None
+
+
 def _safe_extract_zip(zip_path: pathlib.Path, output_dir: pathlib.Path, password: bytes):
+    """Extract a retrieval archive into ``output_dir``.
+
+    XDR encrypts retrieval archives with ZipCrypto, which the stdlib decrypts
+    in pure Python at about 1 MB/s; 7-Zip and Info-ZIP unzip do it at disk
+    speed. Use them when installed and fall back to zipfile otherwise."""
     with zipfile.ZipFile(zip_path) as zf:
-        for member in zf.infolist():
-            name = member.filename
-            if not name or name.endswith("/"):
-                continue
-            destination = (output_dir / name).resolve()
-            if os.path.commonpath([str(output_dir.resolve()), str(destination)]) != str(output_dir.resolve()):
-                raise click.ClickException(f"Unsafe zip entry path: {name}")
+        members = _check_zip_members(zf, output_dir)
+        cmd = _external_unzip_command(zip_path, output_dir, password)
+        if cmd:
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            if proc.returncode == 0:
+                return
+            logger.warning(
+                "%s failed to extract %s (exit %d: %s); falling back to Python",
+                os.path.basename(cmd[0]), zip_path, proc.returncode,
+                (proc.stderr or proc.stdout).strip()[:300],
+            )
+        for member in members:
+            destination = output_dir / member.filename
             destination.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member, pwd=password) as src, open(destination, "wb") as dst:
-                dst.write(src.read())
+                shutil.copyfileobj(src, dst, 1024 * 1024)
 
 
 def _flatten_endpoint_path(path: str) -> str:
@@ -734,11 +784,10 @@ def _rename_payload_files_from_manifest(output_dir: pathlib.Path) -> None:
                 pass
 
 
-def _extract_retrieved_file_zip(content: bytes, output_dir: pathlib.Path) -> None:
+def _extract_retrieved_file_zip(outer_zip_path: pathlib.Path, output_dir: pathlib.Path) -> None:
+    """Extract a downloaded retrieval archive, then delete it."""
     password = b"suspicious"
     output_dir.mkdir(parents=True, exist_ok=True)
-    outer_zip_path = output_dir / "retrieved_file.zip"
-    outer_zip_path.write_bytes(content)
     _safe_extract_zip(outer_zip_path, output_dir, password)
 
     inner_zip_path = output_dir / "script_output.zip"
@@ -762,11 +811,15 @@ def _extract_retrieved_file_zip(content: bytes, output_dir: pathlib.Path) -> Non
 @click.pass_context
 def get_file(ctx: click.Context, endpoint_id: str, path: List[str], output: pathlib.Path, hostname):
     """Retrieve a file from an endpoint and extract the returned archives."""
-    content = _execute(
+    output.mkdir(parents=True, exist_ok=True)
+    archive = output / "retrieved_file.zip"
+    _execute(
         ctx,
-        lambda client: client.files.retrieve(endpoint_id=endpoint_id, hostname=hostname, paths=list(path)),
+        lambda client: client.files.retrieve_to_file(
+            endpoint_id=endpoint_id, hostname=hostname, paths=list(path), destination=archive
+        ),
     )
-    _extract_retrieved_file_zip(content, output)
+    _extract_retrieved_file_zip(archive, output)
     if _json_mode(ctx):
         emit(ctx, {"output_dir": str(output), "paths": list(path)})
 

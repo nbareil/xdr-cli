@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
@@ -13,6 +14,7 @@ from .models import XdrClientOptions, XdrTenant
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_DOWNLOAD_CHUNK = 1024 * 1024
 # A 500 carrying this BigQuery message is deterministic (e.g. a too-deep
 # search_from); retrying only burns time.
 _NON_TRANSIENT_MARKERS = ("Resources exceeded",)
@@ -118,6 +120,42 @@ class XdrTransport:
         if response.status_code != 200:
             raise XdrApiError(url, response.status_code, response.reason_phrase, response.text)
         return response.content
+
+    async def download_url(
+        self,
+        url: str,
+        destination: Union[str, "os.PathLike[str]"],
+        headers: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """POST to ``url`` and stream the response body into ``destination``.
+
+        Unlike ``post_bytes_url``, the body never sits in memory, which
+        matters for file retrievals of several hundred MB. Returns the number
+        of bytes written; a partial file is removed on error.
+        """
+        req_headers = {}
+        if headers:
+            req_headers.update(headers)
+        req_headers.update(self.build_auth_headers())
+        written = 0
+        try:
+            async with self._client.stream("POST", url, headers=req_headers) as response:
+                if response.status_code != 200:
+                    text = await response.aread()
+                    raise XdrApiError(url, response.status_code, response.reason_phrase, text.decode("utf-8", errors="replace"))
+                with open(destination, "wb") as fh:
+                    async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK):
+                        fh.write(chunk)
+                        written += len(chunk)
+        except BaseException as exc:
+            try:
+                os.remove(destination)
+            except OSError:
+                pass
+            if isinstance(exc, httpx.HTTPError):
+                raise XdrTransportError(str(exc) or type(exc).__name__)
+            raise
+        return written
 
     async def post_stream_lines(self, uri: str, parameters: Dict[str, Any]) -> list:
         url = self.build_api_url(uri)

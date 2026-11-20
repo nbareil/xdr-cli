@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional
+import os
+from typing import List, Optional, Union
 
 from ..errors import XdrOperationTimeoutError, XdrValidationError
 from .actions import FINAL_ACTION_STATES as _FINAL_STATES
@@ -20,6 +21,20 @@ class FilesService(BaseService):
         return obj.get("reply", {}).get("data", {})
 
     async def retrieve(self, endpoint_id: str, paths: List[str], hostname: Optional[str] = None, poll_interval_seconds: float = 5.0, poll_attempts: Optional[int] = None) -> bytes:
+        """Retrieve ``paths`` and return the archive in memory."""
+        dl_url = await self._retrieve_download_url(endpoint_id, paths, hostname, poll_interval_seconds, poll_attempts)
+        return await self.transport.post_bytes_url(dl_url)
+
+    async def retrieve_to_file(self, endpoint_id: str, paths: List[str], destination: Union[str, "os.PathLike[str]"], hostname: Optional[str] = None, poll_interval_seconds: float = 5.0, poll_attempts: Optional[int] = None) -> int:
+        """Retrieve ``paths`` and stream the archive to ``destination``.
+
+        Returns the archive size in bytes.
+        """
+        dl_url = await self._retrieve_download_url(endpoint_id, paths, hostname, poll_interval_seconds, poll_attempts)
+        return await self.transport.download_url(dl_url, destination)
+
+    async def _retrieve_download_url(self, endpoint_id: str, paths: List[str], hostname: Optional[str], poll_interval_seconds: float, poll_attempts: Optional[int]) -> str:
+        """Start a file retrieval, wait for it, and return its download URL."""
         if hostname:
             endpoints = await self.client.endpoints.get_by_hostname(hostname)
             endpoint_id = endpoints[0].get("endpoint_id")
@@ -53,4 +68,4 @@ class FilesService(BaseService):
         dl_url = details.get(endpoint_id)
         if not dl_url:
             raise XdrValidationError("No download URL for endpoint %s" % endpoint_id)
-        return await self.transport.post_bytes_url(dl_url)
+        return dl_url

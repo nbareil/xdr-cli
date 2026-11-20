@@ -277,6 +277,8 @@ $ xdr-cli --profile demo endpoint list| jq 'select(.tag|contains("XXX")) | .endp
 $ xdr-cli --profile=demo get-file --hostname DESKTOP-V24D23 'C:\Temp\NetMonitor.exe' -o /tmp/net_monitor.zip
 ```
 
+XDR returns retrieved files in a ZipCrypto-encrypted archive. Python decrypts that format at about 1 MB/s, so install 7-Zip (`7zz`, `7z` or `7za`) or Info-ZIP `unzip`: `get-file` uses the first one it finds in `PATH` and extracts at disk speed. Without either, it falls back to Python.
+
 If you are going to acquire a large number of files, a slight optimization is to specify the *Endpoint ID* instead of the hostname to remove one back-and-forth with the server:
 
 ```
